@@ -6,6 +6,7 @@
 const std = @import("std");
 const aegis = @import("aegis");
 const uplink = @import("uplink");
+const clearance = @import("clearance");
 const form = @import("uplink.wire").form;
 const metadata = @import("../metadata.zig");
 const pkce = @import("../pkce.zig");
@@ -137,8 +138,9 @@ pub const AuthorizationFlow = struct {
         errdefer flow.deinit();
         pkce.random(io, &flow.state);
         if (request.nonce) {
-            flow.nonce = undefined;
-            pkce.random(io, &flow.nonce.?);
+            var nonce: [pkce.length]u8 = undefined;
+            pkce.random(io, &nonce);
+            flow.nonce = nonce;
         }
         try authorize.writeUrl(w, endpoint, .{
             .client_id = request.client_id,
@@ -151,6 +153,31 @@ pub const AuthorizationFlow = struct {
             .extra = request.extra,
         });
         return flow;
+    }
+
+    /// Verifies the ID token `set` brought (`error.NoIdToken` when none):
+    /// for the client `client_id` from `server`, with this flow's `nonce` and
+    /// the set's access token for `at_hash`, signed by one of `keys` with one
+    /// of `algorithms`. Strings borrow from `scratch` and the keys.
+    pub fn verifyIdToken(
+        flow: *const AuthorizationFlow,
+        comptime Extra: type,
+        set: *const TokenSet,
+        server: *const Server,
+        client_id: []const u8,
+        keys: []const clearance.Key,
+        algorithms: []const clearance.Algorithm,
+        now: std.Io.Timestamp,
+        scratch: []u8,
+    ) (clearance.id_token.VerifyError || error{NoIdToken})!clearance.id_token.Verified(Extra) {
+        const token_text = set.id_token orelse return error.NoIdToken;
+        return clearance.id_token.verify(Extra, token_text, keys, .{
+            .algorithms = algorithms,
+            .issuer = server.issuer,
+            .client_id = client_id,
+            .nonce = if (flow.nonce) |*n| n else null,
+            .access_token = set.access_token,
+        }, now, scratch);
     }
 
     pub fn deinit(flow: *AuthorizationFlow) void {

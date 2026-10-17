@@ -28,8 +28,8 @@
             .hash = "cloak-0.14.0-9onwcU2TsgMEExxAm1t0a5U6haDzjUmG1SNikYrqPPoc",
         },
         .uplink = .{
-            .url = "git+https://github.com/pedronaugusto/uplink?ref=v0.8.0#6b4d52c7be54ef8df5b659711d3e1092f5b5c7b0",
-            .hash = "uplink-0.8.0-0eVSJldgFQCbf3Vo5jZ1dgJGkPP0b_X51kzMk3BS7nAR",
+            .url = "git+https://github.com/pedronaugusto/uplink?ref=v0.8.1#18d83e054f0b770cbedc42223dc2667a75821fc0",
+            .hash = "uplink-0.8.1-0eVSJimHFQC0-tGlO3JjMnmbN6lR2xHjF_yYgth-IYKD",
             .lazy = true,
         },
     },

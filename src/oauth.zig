@@ -77,6 +77,10 @@ pub const FreshError = http_flow.FreshError;
 pub const RemoteKeySet = http.RemoteKeySet;
 /// Token introspection with its answers kept briefly.
 pub const Introspector = http.Introspector;
+/// A resource server's bearer check: a token from `Authorization`, checked
+/// with a key set or by introspection, for this resource and its scopes;
+/// the 400, 401 or 403 and its challenge when it fails.
+pub const bearer = http.bearer;
 /// The exchanges' options and errors.
 pub const fetch = http.fetch;
 

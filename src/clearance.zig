@@ -14,6 +14,10 @@ pub const jwk = @import("jwk.zig");
 pub const jws = @import("jws.zig");
 /// JSON Web Tokens: claims checked by type, then by value.
 pub const jwt = @import("jwt.zig");
+/// OpenID Connect ID tokens, checked as OpenID Connect Core 3.1.3.7 asks.
+pub const id_token = @import("id_token.zig");
+/// JWT access tokens (RFC 9068), checked by the resource server they are for.
+pub const access_token = @import("access_token.zig");
 
 test {
     if (builtin.is_test) _ = @import("tests.zig");

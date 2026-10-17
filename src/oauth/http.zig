@@ -12,6 +12,8 @@ pub const flow = @import("http/flow.zig");
 pub const RemoteKeySet = @import("http/RemoteKeySet.zig");
 /// Token introspection with its answers kept briefly.
 pub const Introspector = @import("http/Introspector.zig");
+/// A resource server's bearer check and its answers.
+pub const bearer = @import("http/bearer.zig");
 
 test {
     _ = fetch;
@@ -19,4 +21,5 @@ test {
     _ = flow;
     _ = RemoteKeySet;
     _ = Introspector;
+    _ = bearer;
 }

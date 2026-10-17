@@ -1,0 +1,205 @@
+//! A resource server's bearer check: the token read from `Authorization:
+//! Bearer` (RFC 6750 §2.1; never from the query), checked as a JWT access
+//! token (RFC 9068) with a remote key set or asked of the authorization
+//! server (RFC 7662), held to this resource as its audience and to the
+//! scopes the request needs; and the answer when it fails: 400, 401 or 403
+//! with the `WWW-Authenticate` challenge that says why (RFC 6750 §3) and
+//! where this resource's metadata is (RFC 9728 §5.1).
+const std = @import("std");
+const uplink = @import("uplink");
+const clearance = @import("clearance");
+const challenge = @import("../challenge.zig");
+const errors = @import("../errors.zig");
+const RemoteKeySet = @import("RemoteKeySet.zig");
+const Introspector = @import("Introspector.zig");
+
+const access_token = clearance.access_token;
+const jws = clearance.jws;
+const Algorithm = clearance.Algorithm;
+
+/// Where tokens are checked.
+pub const Source = union(enum) {
+    /// JWT access tokens, verified with the authorization server's keys.
+    keys: struct { set: *RemoteKeySet, algorithms: []const Algorithm },
+    /// Tokens of any form, asked of the authorization server.
+    introspection: *Introspector,
+};
+
+/// Who the token speaks for. Strings live in the arena `check` was given.
+pub const Principal = struct {
+    subject: ?[]const u8 = null,
+    client_id: ?[]const u8 = null,
+    /// Space-separated.
+    scope: ?[]const u8 = null,
+    /// Seconds since the epoch.
+    expires_at: ?i64 = null,
+};
+
+/// A request refused: the status to answer with and its challenge.
+pub const Refusal = struct {
+    /// 400 (a malformed `Authorization`), 401 (no token, or one not valid
+    /// here) or 403 (a valid token without the scopes needed).
+    status: std.http.Status,
+    challenge: challenge.Bearer,
+
+    /// Writes the `WWW-Authenticate` value.
+    pub fn write(r: Refusal, w: *std.Io.Writer) challenge.WriteError!void {
+        return challenge.write(w, r.challenge);
+    }
+};
+
+pub const Outcome = union(enum) {
+    allowed: Principal,
+    refused: Refusal,
+};
+
+pub const CheckError = error{
+    /// The key server or the introspection endpoint could not answer, or
+    /// refused this resource server's credentials: a 503, not the client's
+    /// fault.
+    Unavailable,
+    Canceled,
+    OutOfMemory,
+};
+
+pub const Verifier = struct {
+    source: Source,
+    /// The authorization server's issuer identifier.
+    issuer: []const u8,
+    /// This resource's identifier: the audience every token must name.
+    resource: []const u8,
+    /// Where this resource's metadata is, named in every challenge.
+    resource_metadata: ?[]const u8 = null,
+    realm: ?[]const u8 = null,
+    leeway: clearance.jwt.Duration = .literal("0s"),
+    max_token_bytes: jws.Bytes = .literal("16KiB"),
+
+    /// Checks the request's `Authorization` value (null when it has none)
+    /// for a token valid here that grants every scope of `scopes`.
+    pub fn check(v: *const Verifier, io: std.Io, http: *uplink.Client, arena: std.mem.Allocator, authorization: ?[]const u8, scopes: []const []const u8) CheckError!Outcome {
+        const token = switch (bearerToken(authorization)) {
+            .none => return v.refuse(.unauthorized, null, null, null),
+            .malformed => return v.refuse(.bad_request, .invalid_request, "malformed Authorization", null),
+            .token => |t| t,
+        };
+        const limit: usize = v.max_token_bytes.raw();
+        if (token.len > limit) return v.refuse(.unauthorized, .invalid_token, "size", null);
+        const now = std.Io.Clock.real.now(io);
+        const principal = switch (v.source) {
+            .keys => |k| try v.checkJwt(io, http, arena, k.set, k.algorithms, token, now),
+            .introspection => |i| try v.checkIntrospected(io, http, arena, i, token, now),
+        };
+        const p = switch (principal) {
+            .allowed => |p| p,
+            .refused => return principal,
+        };
+        if (!access_token.hasScopes(p.scope, scopes)) {
+            const needed = try std.mem.join(arena, " ", scopes);
+            return v.refuse(.forbidden, .insufficient_scope, null, needed);
+        }
+        return .{ .allowed = p };
+    }
+
+    fn checkJwt(v: *const Verifier, io: std.Io, http: *uplink.Client, arena: std.mem.Allocator, set: *RemoteKeySet, algorithms: []const Algorithm, token: []const u8, now: std.Io.Timestamp) CheckError!Outcome {
+        const scratch = try arena.alloc(u8, jws.scratchLength(token.len));
+        var want: RemoteKeySet.Want = .current;
+        while (true) {
+            var lease = set.lease(io, http, want) catch |err| return switch (err) {
+                error.Canceled => error.Canceled,
+                error.OutOfMemory => error.OutOfMemory,
+                else => error.Unavailable,
+            };
+            defer lease.release();
+            var diagnostics: jws.Diagnostics = .{};
+            const expected: access_token.Expected = .{
+                .algorithms = algorithms,
+                .issuer = v.issuer,
+                .audience = v.resource,
+                .leeway = v.leeway,
+                .max_bytes = v.max_token_bytes,
+                .diagnostics = &diagnostics,
+            };
+            const verified = access_token.verify(void, token, lease.keys, expected, now, scratch) catch |err| {
+                // A key the set lacks: fetched again once, as its cooldown allows.
+                if (err == error.NoKey and want == .current) {
+                    want = .missing_key;
+                    continue;
+                }
+                return v.refuse(.unauthorized, .invalid_token, @tagName(diagnostics.check), null);
+            };
+            // The strings live in `scratch`, the arena's; none in the keys.
+            return .{ .allowed = .{
+                .subject = verified.registered.sub,
+                .client_id = verified.access.client_id,
+                .scope = verified.access.scope,
+                .expires_at = verified.registered.exp,
+            } };
+        }
+    }
+
+    fn checkIntrospected(v: *const Verifier, io: std.Io, http: *uplink.Client, arena: std.mem.Allocator, introspector: *Introspector, token: []const u8, now: std.Io.Timestamp) CheckError!Outcome {
+        const result = introspector.introspect(io, http, arena, token) catch |err| return switch (err) {
+            error.Canceled => error.Canceled,
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.Unavailable,
+        };
+        const i = switch (result) {
+            // The server refused this resource server's own credentials.
+            .refused => return error.Unavailable,
+            .introspected => |i| i,
+        };
+        const seconds: i64 = @intCast(@divFloor(now.nanoseconds, std.time.ns_per_s));
+        const leeway: i64 = v.leeway.raw();
+        if (!i.active) return v.refuse(.unauthorized, .invalid_token, "inactive", null);
+        if (i.bound) return v.refuse(.unauthorized, .invalid_token, "bound", null);
+        if (i.exp) |exp| if (seconds >= exp +| leeway) return v.refuse(.unauthorized, .invalid_token, "expired", null);
+        if (i.nbf) |nbf| if (seconds +| leeway < nbf) return v.refuse(.unauthorized, .invalid_token, "not_yet_valid", null);
+        if (i.iss) |iss| if (!std.mem.eql(u8, iss, v.issuer)) return v.refuse(.unauthorized, .invalid_token, "issuer", null);
+        // A token must name this resource: one for another would be replayed
+        // here (RFC 8707, MCP's audience rule).
+        if (!i.hasAudience(v.resource)) return v.refuse(.unauthorized, .invalid_token, "audience", null);
+        return .{ .allowed = .{ .subject = i.sub, .client_id = i.client_id, .scope = i.scope, .expires_at = i.exp } };
+    }
+
+    fn refuse(v: *const Verifier, status: std.http.Status, code: ?errors.Code, description: ?[]const u8, scope: ?[]const u8) Outcome {
+        return .{ .refused = .{ .status = status, .challenge = .{
+            .realm = v.realm,
+            .@"error" = code,
+            .error_description = description,
+            .scope = scope,
+            .resource_metadata = v.resource_metadata,
+        } } };
+    }
+};
+
+/// What an `Authorization` value holds for a bearer check.
+pub const Extracted = union(enum) { none, malformed, token: []const u8 };
+
+/// The token of an `Authorization: Bearer` value (RFC 6750 §2.1): the scheme
+/// without case, one or more spaces, a b64token. Another scheme is no token.
+pub fn bearerToken(authorization: ?[]const u8) Extracted {
+    const value = authorization orelse return .none;
+    const space = std.mem.findScalar(u8, value, ' ') orelse
+        return if (std.ascii.eqlIgnoreCase(value, "bearer")) .malformed else .none;
+    if (!std.ascii.eqlIgnoreCase(value[0..space], "bearer")) return .none;
+    const token = std.mem.trimStart(u8, value[space..], " ");
+    if (token.len == 0) return .malformed;
+    var i: usize = 0;
+    while (i < token.len and (std.ascii.isAlphanumeric(token[i]) or std.mem.findScalar(u8, "-._~+/", token[i]) != null)) i += 1;
+    if (i == 0) return .malformed;
+    while (i < token.len and token[i] == '=') i += 1;
+    if (i != token.len) return .malformed;
+    return .{ .token = token };
+}
+
+test "the token is read from a Bearer value alone" {
+    try std.testing.expectEqualStrings("mF_9.B5f-4.1JqM", bearerToken("Bearer mF_9.B5f-4.1JqM").token);
+    try std.testing.expectEqualStrings("abc==", bearerToken("bearer   abc==").token);
+    try std.testing.expectEqual(Extracted.none, bearerToken(null));
+    try std.testing.expectEqual(Extracted.none, bearerToken("Basic dXNlcjpwdw=="));
+    try std.testing.expectEqual(Extracted.malformed, bearerToken("Bearer"));
+    try std.testing.expectEqual(Extracted.malformed, bearerToken("Bearer "));
+    try std.testing.expectEqual(Extracted.malformed, bearerToken("Bearer a b"));
+    try std.testing.expectEqual(Extracted.malformed, bearerToken("Bearer a=b"));
+    try std.testing.expectEqual(Extracted.malformed, bearerToken("Bearer \"a\""));
+}

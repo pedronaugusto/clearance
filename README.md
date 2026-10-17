@@ -3,7 +3,8 @@
 clearance is JWT and JOSE (JWS, JWK) and OAuth 2.1 for Zig. Two modules:
 
 - `clearance`: JSON Web Keys and key sets, JWS in the compact serialization,
-  signed and verified, and JWTs whose claims are checked by type before value.
+  signed and verified, JWTs whose claims are checked by type before value,
+  and two profiles: OpenID Connect ID tokens and JWT access tokens (RFC 9068).
   On std, [cloak](https://github.com/pedronaugusto/cloak) (signatures),
   [strand](https://github.com/pedronaugusto/strand) (JSON) and
   [aegis](https://github.com/pedronaugusto/aegis) (checked types) alone.
@@ -11,7 +12,8 @@ clearance is JWT and JOSE (JWS, JWK) and OAuth 2.1 for Zig. Two modules:
   [uplink](https://github.com/pedronaugusto/uplink): discovery, the
   authorization code flow with PKCE, refresh, client credentials,
   registration, key sets kept from a `jwks_uri`, introspection, a token store;
-  and every message underneath, sans I/O, for any HTTP stack.
+  a resource server's bearer check with its 401 and 403 answers; and every
+  message underneath, sans I/O, for any HTTP stack.
 
 Work in progress toward the public cut.
 
@@ -148,11 +150,14 @@ tokens refreshed.
 In this release: JWS compact serialization with HS256/384/512, RS256/384/512,
 PS256/384/512, ES256, ES384 and EdDSA (Ed25519, under both its names); JWK
 and JWK sets (RSA, EC P-256 and P-384, OKP Ed25519, oct); thumbprints (RFC
-7638) and their URIs (RFC 9278); JWT claims and explicit typing. OAuth 2.1
+7638) and their URIs (RFC 9278); JWT claims and explicit typing; ID tokens
+(OpenID Connect Core 3.1.3.7, `at_hash`) and RFC 9068 access tokens. OAuth 2.1
 flows on uplink: discovery (RFC 8414, OpenID Connect, RFC 9728), the
 authorization code flow with PKCE, refresh, client credentials, RFC 7591
 registration, remote key sets, cached introspection, a token store kept fresh,
-the Bearer challenge read for a step-up. Their messages: RFC 8414 and OpenID Connect Discovery metadata, RFC 9728 protected
+the Bearer challenge read for a step-up, the resource server's bearer check
+(a key set or introspection, the audience and scopes, RFC 6750 and RFC 9728
+answers). Their messages: RFC 8414 and OpenID Connect Discovery metadata, RFC 9728 protected
 resource metadata, PKCE (S256), the authorization request with RFC 8707
 resources and its callback with RFC 9207's `iss`, the authorization code,
 refresh and client credentials grants, client authentication (none,

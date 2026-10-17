@@ -397,15 +397,19 @@ test "a store's tokens are refreshed and saved when they expire, forgotten when 
     try testing.expectEqual(@as(?oauth.TokenSet, null), try tokens.load(io, gpa, key));
 }
 
-/// A JWT for the provider's audience, signed with RFC 8037's key under `kid`.
+/// A JWT for `audience`, signed with RFC 8037's key under `kid`.
 fn signToken(gpa: std.mem.Allocator, io: Io, out: *std.Io.Writer, kid: []const u8, audience: []const u8) !void {
+    const now: i64 = @intCast(@divFloor(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
+    try signClaims(gpa, io, out, kid, .{ .iss = "issuer", .aud = audience, .exp = now + 600 });
+}
+
+fn signClaims(gpa: std.mem.Allocator, io: Io, out: *std.Io.Writer, kid: []const u8, claims: anytype) !void {
     var der: [48]u8 = undefined;
     _ = try std.fmt.hexToBytes(der[0..16], ed25519_der_prefix);
     _ = try std.base64.url_safe_no_pad.Decoder.decode(der[16..48], ed25519_d);
     const key = try cloak.PrivateKey.parse(gpa, &der, .{});
     defer key.deinit();
-    const now: i64 = @intCast(@divFloor(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
-    try clearance.jwt.sign(gpa, io, out, .{ .kid = kid, .typ = "at+jwt" }, .{ .iss = "issuer", .aud = audience, .exp = now + 600 }, .{ .private = .{ .alg = .eddsa, .key = key } });
+    try clearance.jwt.sign(gpa, io, out, .{ .kid = kid, .typ = "at+jwt" }, claims, .{ .private = .{ .alg = .eddsa, .key = key } });
 }
 
 test "a remote key set is fetched once, kept as its answer says, and fetched again for a new kid" {
@@ -534,4 +538,102 @@ test "introspection answers are kept until the bound, by the token's hash" {
     p.mutex.lockUncancelable(io);
     defer p.mutex.unlock(io);
     try testing.expectEqual(@as(u32, 3), p.introspections);
+}
+
+test "a resource server's bearer check: JWT access tokens with the key set, or introspection; 401 and 403 answers" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var p: Provider = undefined;
+    try p.start(io);
+    defer p.stop(io);
+    var http: uplink.Client = .init(gpa, .{});
+    defer http.deinit(io);
+    var buffer: [128]u8 = undefined;
+    var keys = try oauth.RemoteKeySet.init(gpa, p.url(&buffer, "/jwks"), .{});
+    defer keys.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const verifier: oauth.bearer.Verifier = .{
+        .source = .{ .keys = .{ .set = &keys, .algorithms = &.{.eddsa} } },
+        .issuer = "https://as.example",
+        .resource = "https://rs.example/mcp",
+        .resource_metadata = "https://rs.example/.well-known/oauth-protected-resource/mcp",
+    };
+    const now: i64 = @intCast(@divFloor(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
+    var token: std.Io.Writer.Allocating = .init(gpa);
+    defer token.deinit();
+    try token.writer.writeAll("Bearer ");
+    try signClaims(gpa, io, &token.writer, "k1", .{ .iss = "https://as.example", .aud = "https://rs.example/mcp", .sub = "u1", .client_id = "app", .scope = "mcp files:read", .exp = now + 600, .iat = now, .jti = "j1" });
+
+    const allowed = try verifier.check(io, &http, arena, token.written(), &.{"files:read"});
+    try testing.expectEqualStrings("u1", allowed.allowed.subject.?);
+    try testing.expectEqualStrings("app", allowed.allowed.client_id.?);
+
+    const forbidden = (try verifier.check(io, &http, arena, token.written(), &.{ "files:read", "files:write" })).refused;
+    try testing.expectEqual(std.http.Status.forbidden, forbidden.status);
+    var out: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&out);
+    try forbidden.write(&w);
+    try testing.expectEqualStrings("Bearer error=\"insufficient_scope\", scope=\"files:read files:write\", resource_metadata=\"https://rs.example/.well-known/oauth-protected-resource/mcp\"", w.buffered());
+
+    const anonymous = (try verifier.check(io, &http, arena, null, &.{})).refused;
+    try testing.expectEqual(std.http.Status.unauthorized, anonymous.status);
+    try testing.expectEqual(@as(?oauth.errors.Code, null), anonymous.challenge.@"error");
+    try testing.expectEqualStrings(verifier.resource_metadata.?, anonymous.challenge.resource_metadata.?);
+    const malformed = (try verifier.check(io, &http, arena, "Bearer a b", &.{})).refused;
+    try testing.expectEqual(std.http.Status.bad_request, malformed.status);
+
+    // A token for another resource is refused here, as is a forged one.
+    token.clearRetainingCapacity();
+    try token.writer.writeAll("Bearer ");
+    try signClaims(gpa, io, &token.writer, "k1", .{ .iss = "https://as.example", .aud = "https://other.example", .sub = "u1", .client_id = "app", .exp = now + 600, .iat = now, .jti = "j2" });
+    const elsewhere = (try verifier.check(io, &http, arena, token.written(), &.{})).refused;
+    try testing.expectEqual(oauth.errors.Code.invalid_token, elsewhere.challenge.@"error".?);
+    try testing.expectEqualStrings("audience", elsewhere.challenge.error_description.?);
+    const forged = (try verifier.check(io, &http, arena, "Bearer eyJhbGciOiJFZERTQSJ9.e30.AAAA", &.{})).refused;
+    try testing.expectEqual(std.http.Status.unauthorized, forged.status);
+
+    // Introspection: the provider answers for the token `good`, naming its
+    // own base as the audience.
+    var introspector = try oauth.Introspector.init(gpa, p.url(&buffer, "/introspect"), p.base, .{ .id = "rs", .credentials = .{ .client_secret_basic = "pw" } }, .{});
+    defer introspector.deinit();
+    const asking: oauth.bearer.Verifier = .{ .source = .{ .introspection = &introspector }, .issuer = p.base, .resource = p.base };
+    const active = try asking.check(io, &http, arena, "Bearer good", &.{"mcp"});
+    try testing.expectEqualStrings("mcp", active.allowed.scope.?);
+    const inactive = (try asking.check(io, &http, arena, "Bearer bad", &.{})).refused;
+    try testing.expectEqualStrings("inactive", inactive.challenge.error_description.?);
+}
+
+test "an ID token from the code flow: the flow's nonce and the access token's hash expected" {
+    const io = testing.io;
+    var w: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer w.deinit();
+    const server: oauth.metadata.AuthorizationServer = .{ .issuer = "https://op.example", .authorization_endpoint = "https://op.example/authorize" };
+    var flow = try oauth.AuthorizationFlow.begin(io, &server, .{ .client_id = "app", .redirect_uri = "http://127.0.0.1/cb", .nonce = true }, &w.writer);
+    defer flow.deinit();
+    try testing.expect(std.mem.find(u8, w.written(), "&nonce=") != null);
+
+    const now: i64 = @intCast(@divFloor(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
+    var hash: [43]u8 = undefined;
+    const at_hash = clearance.id_token.accessTokenHash(.eddsa, "at", &hash);
+    var id: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer id.deinit();
+    var der: [48]u8 = undefined;
+    _ = try std.fmt.hexToBytes(der[0..16], ed25519_der_prefix);
+    _ = try std.base64.url_safe_no_pad.Decoder.decode(der[16..48], ed25519_d);
+    const key = try cloak.PrivateKey.parse(testing.allocator, &der, .{});
+    defer key.deinit();
+    try clearance.jwt.sign(testing.allocator, io, &id.writer, .{ .kid = "k1" }, .{ .iss = "https://op.example", .sub = "u1", .aud = "app", .nonce = @as([]const u8, &flow.nonce.?), .at_hash = at_hash, .exp = now + 600, .iat = now }, .{ .private = .{ .alg = .eddsa, .key = key } });
+    var set = try oauth.TokenSet.init(testing.allocator, .{ .access_token = "at", .id_token = id.written() });
+    defer set.deinit();
+    var keys = try clearance.jwk.KeySet.parse(testing.allocator, "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"kid\":\"k1\",\"x\":\"" ++ ed25519_x ++ "\"}", .{});
+    defer keys.deinit();
+    var scratch: [2048]u8 = undefined;
+    const verified = try flow.verifyIdToken(void, &set, &server, "app", keys.keys, &.{.eddsa}, Io.Clock.real.now(io), &scratch);
+    try testing.expectEqualStrings("u1", verified.registered.sub.?);
+    // Another access token beside it fails its hash.
+    var other = try oauth.TokenSet.init(testing.allocator, .{ .access_token = "other", .id_token = id.written() });
+    defer other.deinit();
+    try testing.expectError(error.WrongAccessTokenHash, flow.verifyIdToken(void, &other, &server, "app", keys.keys, &.{.eddsa}, Io.Clock.real.now(io), &scratch));
 }

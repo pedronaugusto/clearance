@@ -96,6 +96,9 @@ pub fn Verified(comptime Claims: type) type {
         claims: Claims,
         key: *const Key,
         payload: []const u8,
+        /// What of the scratch buffer is still free: room for a profile to
+        /// read more of the payload.
+        rest: []u8,
     };
 }
 
@@ -166,7 +169,7 @@ fn readClaims(comptime Claims: type, verified: jws.Verified, validation: Validat
         .ignore_unknown_fields = validation.ignore_unknown_claims,
         .limits = .{ .depth = 32 },
     }) catch return error.InvalidClaims;
-    return .{ .header = verified.header, .registered = registered, .claims = claims, .key = verified.key, .payload = verified.payload };
+    return .{ .header = verified.header, .registered = registered, .claims = claims, .key = verified.key, .payload = verified.payload, .rest = verified.rest[fixed.end_index..] };
 }
 
 fn present(raw: strand.json.Raw) bool {
@@ -199,7 +202,7 @@ fn readRegistered(arena: std.mem.Allocator, wire: WireRegistered) VerifyError!Re
 /// A NumericDate (RFC 7519 §2): a JSON number of seconds, a fraction allowed
 /// and dropped toward the past. Anything else, or a value no clock reaches,
 /// refuses the token.
-fn numericDate(bytes: []const u8) VerifyError!i64 {
+pub fn numericDate(bytes: []const u8) VerifyError!i64 {
     const text = std.mem.trim(u8, bytes, " \t\r\n");
     if (text.len == 0 or text.len > 32) return error.InvalidClaims;
     if (text[0] != '-' and !std.ascii.isDigit(text[0])) return error.InvalidClaims;
