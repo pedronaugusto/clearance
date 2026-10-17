@@ -173,10 +173,10 @@ pub const TokenSet = struct {
 
     /// A set from what `write` wrote.
     pub fn read(gpa: std.mem.Allocator, json: []const u8) ReadError!TokenSet {
-        var scratch = try parseScratch(gpa, json.len);
+        var scratch: Scratch = .{};
+        try scratch.init(gpa, json.len);
         defer scratch.deinit();
-        var fixed: std.heap.FixedBufferAllocator = .init(scratch.exposeMut());
-        const stored = strand.json.parseLeaky(Stored, fixed.allocator(), json, .{ .limits = .{ .depth = 4 } }) catch return error.InvalidResponse;
+        const stored = strand.json.parseLeaky(Stored, scratch.allocator(), json, .{ .limits = .{ .depth = 4 } }) catch return error.InvalidResponse;
         if (!std.ascii.eqlIgnoreCase(stored.token_type, "bearer")) return error.UnsupportedTokenType;
         return init(gpa, .{
             .access_token = stored.access_token,
@@ -246,10 +246,10 @@ pub fn readResponse(gpa: std.mem.Allocator, status: u16, body: []const u8, optio
         if (body.len <= 4096) if (errors.readJson(body, &scratch)) |e| return .{ .refused = e };
         return error.UnexpectedStatus;
     }
-    var scratch = try parseScratch(gpa, body.len);
+    var scratch: Scratch = .{};
+    try scratch.init(gpa, body.len);
     defer scratch.deinit();
-    var fixed: std.heap.FixedBufferAllocator = .init(scratch.exposeMut());
-    const wire = strand.json.parseLeaky(Wire, fixed.allocator(), body, .{
+    const wire = strand.json.parseLeaky(Wire, scratch.allocator(), body, .{
         .ignore_unknown_fields = true,
         .limits = .{ .depth = 16 },
     }) catch return error.InvalidResponse;
@@ -266,15 +266,72 @@ pub fn readResponse(gpa: std.mem.Allocator, status: u16, body: []const u8, optio
     }) };
 }
 
-/// Wiped memory for parsing `length` bytes of JSON that may hold secrets:
-/// what an unescaped string and the parser's own bookkeeping take.
-fn parseScratch(gpa: std.mem.Allocator, length: usize) std.mem.Allocator.Error!aegis.SecretBytes {
-    const capacity = length * 2 + 4096;
-    var scratch = aegis.SecretBytes.init(gpa, capacity) catch return error.OutOfMemory;
-    // unreachable: the capacity was just allocated at this length
-    scratch.resizeWithinCapacity(capacity) catch unreachable;
-    return scratch;
+/// What reading `length` bytes of JSON that may hold secrets can take: its
+/// unescaped strings and the parser's own bookkeeping.
+fn scratchLength(length: usize) usize {
+    return length * 2 + 4096;
 }
+
+/// Where a response is parsed: on the stack when it is small (a token
+/// response usually is), on the heap in wiped memory when it is not. Only
+/// what the parser wrote is wiped from the stack: strings it unescaped, so a
+/// response without escapes costs no allocation and no wipe.
+const Scratch = struct {
+    stack: [scratchLength(2048)]u8 = undefined,
+    heap: ?aegis.SecretBytes = null,
+    fixed: std.heap.FixedBufferAllocator = undefined,
+    /// The furthest the parser has written: a shrink or a free moves the
+    /// fixed allocator's end back, never this.
+    high: usize = 0,
+
+    fn init(s: *Scratch, gpa: std.mem.Allocator, length: usize) std.mem.Allocator.Error!void {
+        const capacity = scratchLength(length);
+        if (capacity <= s.stack.len) {
+            s.fixed = .init(s.stack[0..capacity]);
+            return;
+        }
+        s.heap = aegis.SecretBytes.init(gpa, capacity) catch return error.OutOfMemory;
+        // unreachable: the capacity was just allocated at this length
+        s.heap.?.resizeWithinCapacity(capacity) catch unreachable;
+        s.fixed = .init(s.heap.?.exposeMut());
+    }
+
+    fn deinit(s: *Scratch) void {
+        if (s.heap) |*h| return h.deinit();
+        std.crypto.secureZero(u8, s.stack[0..s.high]);
+    }
+
+    fn allocator(s: *Scratch) std.mem.Allocator {
+        return .{ .ptr = s, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn mark(s: *Scratch) void {
+        s.high = @max(s.high, s.fixed.end_index);
+    }
+
+    fn alloc(opaque_self: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+        const s: *Scratch = @ptrCast(@alignCast(opaque_self)); // safe: the vtable is only ever handed out with a *Scratch
+        defer s.mark();
+        return s.fixed.allocator().rawAlloc(len, alignment, ret);
+    }
+
+    fn resize(opaque_self: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
+        const s: *Scratch = @ptrCast(@alignCast(opaque_self)); // safe: the vtable is only ever handed out with a *Scratch
+        defer s.mark();
+        return s.fixed.allocator().rawResize(memory, alignment, new_len, ret);
+    }
+
+    fn remap(opaque_self: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
+        const s: *Scratch = @ptrCast(@alignCast(opaque_self)); // safe: the vtable is only ever handed out with a *Scratch
+        defer s.mark();
+        return s.fixed.allocator().rawRemap(memory, alignment, new_len, ret);
+    }
+
+    fn free(opaque_self: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+        const s: *Scratch = @ptrCast(@alignCast(opaque_self)); // safe: the vtable is only ever handed out with a *Scratch
+        s.fixed.allocator().rawFree(memory, alignment, ret);
+    }
+};
 
 const testing = std.testing;
 const ctx: client_auth.Context = .{ .issuer = "https://as.example", .now = .{ .nanoseconds = 0 } };
@@ -336,4 +393,25 @@ test "a set is written for a store and read back" {
     try testing.expectEqual(@as(?i64, 5), back.expires_at);
     try testing.expectEqualStrings("s", back.scope.?);
     try testing.expectEqual(@as(?[]const u8, null), back.refresh_token);
+}
+
+test "a response is parsed on the stack when small and in wiped heap memory when not; escapes are read either way" {
+    const now: std.Io.Timestamp = .{ .nanoseconds = 0 };
+    var small = (try readResponse(testing.allocator, 200, "{\"access_token\":\"a\\u0062c\\/d\",\"token_type\":\"Bearer\"}", .{ .now = now })).tokens;
+    defer small.deinit();
+    try testing.expectEqualStrings("abc/d", small.access_token);
+
+    // Past what the stack holds: the scratch comes from the allocator.
+    var body: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer body.deinit();
+    try body.writer.writeAll("{\"access_token\":\"x\\u0079");
+    try body.writer.splatByteAll('z', 4096);
+    try body.writer.writeAll("\",\"token_type\":\"bearer\"}");
+    var large = (try readResponse(testing.allocator, 200, body.written(), .{ .now = now })).tokens;
+    defer large.deinit();
+    try testing.expectEqual(4098, large.access_token.len);
+    try testing.expectEqualStrings("xyzz", large.access_token[0..4]);
+
+    var failing: testing.FailingAllocator = .init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, readResponse(failing.allocator(), 200, body.written(), .{ .now = now }));
 }

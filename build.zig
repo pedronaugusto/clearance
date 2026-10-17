@@ -155,6 +155,9 @@ fn suite(b: *std.Build, name: []const u8, root: []const u8, target: std.Build.Re
 /// time the Debug module. `b` is the development build; preflight adds
 /// shakedown.
 fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
-    const clearance = b.dependency("clearance", .{ .target = target, .optimize = optimize, .oauth = true }).module("clearance");
-    return b.allocator.dupe(std.Build.Module.Import, &.{.{ .name = "clearance", .module = clearance }}) catch @panic("OOM");
+    const package = b.dependency("clearance", .{ .target = target, .optimize = optimize, .oauth = true });
+    return b.allocator.dupe(std.Build.Module.Import, &.{
+        .{ .name = "clearance", .module = package.module("clearance") },
+        .{ .name = "clearance.oauth", .module = package.module("clearance.oauth") },
+    }) catch @panic("OOM");
 }
