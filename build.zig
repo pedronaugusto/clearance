@@ -1,10 +1,12 @@
 const std = @import("std");
 
 /// What a project that depends on clearance builds: `clearance`, on std,
-/// aegis, strand and cloak.
+/// aegis, strand, cloak and `uplink.wire` (uplink's codecs, sans I/O: uplink's
+/// client and what it fetches stay out).
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const uplink = b.dependency("uplink", .{ .target = target, .optimize = optimize, .client = false });
     _ = b.addModule("clearance", .{
         .root_source_file = b.path("src/clearance.zig"),
         .target = target,
@@ -13,6 +15,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "aegis", .module = b.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis") },
             .{ .name = "strand", .module = b.dependency("strand", .{ .target = target, .optimize = optimize }).module("strand") },
             .{ .name = "cloak", .module = b.dependency("cloak", .{ .target = target, .optimize = optimize }).module("cloak") },
+            .{ .name = "uplink.wire", .module = uplink.module("uplink.wire") },
         },
     });
 }
@@ -29,6 +32,7 @@ pub fn dev(b: *std.Build, tools: type) void {
     const aegis = p.dependency("aegis", .{ .target = target, .optimize = optimize });
     const strand = p.dependency("strand", .{ .target = target, .optimize = optimize });
     const cloak = p.dependency("cloak", .{ .target = target, .optimize = optimize });
+    const uplink = p.dependency("uplink", .{ .target = target, .optimize = optimize, .client = false });
     const filters: []const []const u8 = if (test_filter) |filter| &.{filter} else &.{};
 
     const test_step = b.step("test", "Run the tests, the example and each benchmark once");
@@ -82,7 +86,7 @@ pub fn dev(b: *std.Build, tools: type) void {
     });
     // A project that depends on clearance by path, with only the packages
     // clearance needs: the build a consumer gets.
-    tools.preflight.addConsumerCheck(b, p, .{ .package = "clearance", .program = p.path("ci/consumer.zig"), .packages = &.{ aegis, strand, cloak }, .modules = &.{"clearance"} });
+    tools.preflight.addConsumerCheck(b, p, .{ .package = "clearance", .program = p.path("ci/consumer.zig"), .packages = &.{ aegis, strand, cloak, uplink }, .modules = &.{"clearance"} });
 }
 
 /// The tests run in the `clearance` module itself, which gets shakedown for

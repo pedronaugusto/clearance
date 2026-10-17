@@ -73,7 +73,7 @@ pub const Validation = struct {
     subject: ?[]const u8 = null,
     /// The header's `typ` must name this media type, compared without case
     /// and with or without `application/` (RFC 7515 §4.1.9): `at+jwt` for
-    /// access tokens (RFC 9068), `dpop+jwt` for DPoP proofs. Null accepts any.
+    /// access tokens (RFC 9068). Null accepts any.
     typ: ?[]const u8 = null,
     required: Required = .{},
     /// Clock skew forgiven on `exp`, `nbf` and `iat`; at most five minutes.

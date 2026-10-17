@@ -7,6 +7,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "keys", .patterns = &.{ "src/Key.zig", "src/jwk.zig" } },
     .{ .name = "JWS", .patterns = &.{"src/jws.zig"} },
     .{ .name = "JWT", .patterns = &.{"src/jwt.zig"} },
+    .{ .name = "OAuth messages", .patterns = &.{ "src/oauth/*.zig", "src/oauth.zig" } },
     .{ .name = "public", .patterns = &.{"src/clearance.zig"} },
 };
 
@@ -21,6 +22,7 @@ const package_references = [_]gantry.rules.ReferenceRule{
         "aegis",
         "strand",
         "cloak",
+        "uplink.wire",
         "shakedown",
         "clearance",
         "preflight_bench_options",

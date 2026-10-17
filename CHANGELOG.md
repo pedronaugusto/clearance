@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `oauth`: OAuth 2.1's messages, sans I/O, on `uplink.wire`. `url`: endpoints held to HTTPS (HTTP to loopback alone), issuers, the metadata locations of RFC 8414, OpenID Connect Discovery and RFC 9728 in MCP's order, a resource matched exactly or as an ancestor, and client ID metadata document URLs checked. `metadata`: authorization server and protected resource metadata read, the issuer compared byte for byte and the resource as the caller's rule says, every endpoint checked; protected resource metadata written. `pkce`: S256 alone, verifiers and `state`/`nonce` values from `io`, compared in constant time. `authorize`: the authorization URL (RFC 8707 resources, the endpoint's own query kept) and the callback read: `state`, then RFC 9207's `iss` (compared as a string, required when advertised, checked when sent anyway), then the code or the error; a parameter twice refused. `client_auth`: none, `client_secret_basic` (id and secret form-encoded first), `client_secret_post` and `private_key_jwt` (its audience the issuer), chosen from the server's list; form requests in wiped memory. `token`: the code, refresh and client-credentials grants; responses read into a `TokenSet` whose tokens live in wiped memory, expiry from the moment read, the requested scope and the previous refresh token kept when the response leaves them out, a type other than Bearer refused; a set written and read for a store. `registration`: RFC 7591 requests and responses (a secret with no expiry refused), client ID metadata documents written. `introspection`: RFC 7662 requests and responses, the audience one or several, a key-bound token marked. `challenge`: Bearer challenges read (with `resource_metadata`) and written, and a step-up's scope. `errors`: an OAuth error response as a value with its text inline.
+- Properties over every OAuth reader (metadata, token, registration and introspection responses, the callback, challenges), fuzzed in the release tier.
+
+### Changed
+
+- Depends on uplink 0.8.0 for `uplink.wire` alone (`.client = false`: uplink's client and what it fetches stay out).
+
 ## [0.1.0] - 2026-10-17
 
 ### Added

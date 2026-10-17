@@ -27,6 +27,10 @@
             .url = "git+https://github.com/pedronaugusto/cloak?ref=v0.14.0#96937bd116c5b782d05c892b065185946ca5af44",
             .hash = "cloak-0.14.0-9onwcU2TsgMEExxAm1t0a5U6haDzjUmG1SNikYrqPPoc",
         },
+        .uplink = .{
+            .url = "git+https://github.com/pedronaugusto/uplink?ref=v0.8.0#6b4d52c7be54ef8df5b659711d3e1092f5b5c7b0",
+            .hash = "uplink-0.8.0-0eVSJldgFQCbf3Vo5jZ1dgJGkPP0b_X51kzMk3BS7nAR",
+        },
     },
     .dev_dependencies = .{
         .preflight = .{

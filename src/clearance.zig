@@ -1,4 +1,5 @@
-//! OAuth 2.1 and JOSE for Zig. This release: JOSE (JWS, JWK, JWT).
+//! OAuth 2.1 and JOSE for Zig: JOSE (JWS, JWK, JWT), and OAuth 2.1's
+//! messages sans I/O.
 const builtin = @import("builtin");
 
 /// Base64url without padding, strict, as JOSE writes binary members.
@@ -13,6 +14,10 @@ pub const jwk = @import("jwk.zig");
 pub const jws = @import("jws.zig");
 /// JSON Web Tokens: claims checked by type, then by value.
 pub const jwt = @import("jwt.zig");
+/// OAuth 2.1 messages, sans I/O: metadata, PKCE, the authorization request
+/// and callback, token requests and responses, client authentication,
+/// registration, introspection, bearer challenges.
+pub const oauth = @import("oauth.zig");
 
 test {
     if (builtin.is_test) _ = @import("tests.zig");

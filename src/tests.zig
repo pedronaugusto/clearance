@@ -6,6 +6,7 @@ test {
     _ = @import("jwk.zig");
     _ = @import("jws.zig");
     _ = @import("jwt.zig");
+    _ = @import("oauth.zig");
     _ = @import("wycheproof_test.zig");
     _ = @import("property_test.zig");
 }
