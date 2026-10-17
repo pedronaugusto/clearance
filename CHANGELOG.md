@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-17
+
 ### Breaking
 
 - Two modules: `clearance` is JWT and JOSE alone, on std, aegis, strand and cloak; OAuth 2.1 is the module `clearance.oauth` (the messages that were `clearance.oauth`, and the flows), built when a project sets the build option `oauth`. uplink is a lazy dependency, fetched only then: a project that verifies and signs tokens fetches no uplink.
@@ -44,6 +46,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `jwt`: claims read by type before value (a registered claim of the wrong JSON type refuses the token), `exp` required unless the validation says otherwise, `nbf`, `iat` and `max_age` with a bounded leeway, `iss`, `sub` and `aud` (a token with an audience refused by a verifier that names none), explicit typing (`at+jwt`, `dpop+jwt`), custom claims decoded into the caller's type; `sign`.
 - Tests: RFC 7520, 7638 and 8037 examples; Wycheproof's `json_web_signature`, `json_web_key` and `json_web_crypto` files (465 of 475 cases as the files say, 10 diverging by decision, each named in the harness); properties over tokens, key sets and claims, fuzzed in the release tier.
 
-[Unreleased]: https://github.com/pedronaugusto/clearance/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/pedronaugusto/clearance/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/pedronaugusto/clearance/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/pedronaugusto/clearance/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/pedronaugusto/clearance/releases/tag/v0.1.0

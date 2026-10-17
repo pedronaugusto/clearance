@@ -1,6 +1,6 @@
 .{
     .name = .clearance,
-    .version = "0.1.1",
+    .version = "0.2.0",
     .minimum_zig_version = "0.17.0",
     .fingerprint = 0x2f4ccbd6f8a602f9, // Changing this has security and trust implications.
     // What a consumer fetches: the module and its documents. The tests,
