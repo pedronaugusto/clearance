@@ -10,6 +10,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `oauth.registration.ClientMetadata.application_type` (`native` or `web`, OpenID Connect Dynamic Client Registration §2), which MCP asks every client to name when it registers.
 
+### Changed
+
+- A registration that gives a secret without `client_secret_expires_at` is read, its expiry null, where it was refused: RFC 7591 requires the member, servers leave it out (the MCP conformance suite's authorization server among them), and its absence says nothing a client acts on.
+
 ## [0.2.2] - 2026-10-17
 
 ### Changed

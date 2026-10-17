@@ -70,8 +70,11 @@ pub const Registration = struct {
     client_secret: ?[]const u8 = null,
     /// Seconds since the epoch; null when the response leaves it out.
     client_id_issued_at: ?i64 = null,
-    /// When the secret expires, seconds since the epoch; 0 for never. Required
-    /// with a secret (RFC 7591 §3.2.1).
+    /// When the secret expires, seconds since the epoch; 0 for never; null
+    /// when the response leaves it out. RFC 7591 §3.2.1 requires it with a
+    /// secret, and servers leave it out (the MCP conformance suite's among
+    /// them): a secret with no expiry stated is read as one that says nothing
+    /// of when it ends, as the members a response omits are.
     client_secret_expires_at: ?i64 = null,
     registration_access_token: ?[]const u8 = null,
     registration_client_uri: ?[]const u8 = null,
@@ -110,7 +113,7 @@ pub const Response = union(enum) {
 pub const ReadError = error{
     TooLarge,
     /// A success that is not a registration: no `client_id`, a member of the
-    /// wrong type or twice, a secret with no expiry.
+    /// wrong type or twice.
     InvalidResponse,
     /// Neither a success nor an OAuth error body.
     UnexpectedStatus,
@@ -145,7 +148,6 @@ pub fn readResponse(gpa: std.mem.Allocator, status: u16, body: []const u8, optio
         .limits = .{ .depth = 16 },
     }) catch return error.InvalidResponse;
     if (wire.client_id.len == 0) return error.InvalidResponse;
-    if (wire.client_secret != null and wire.client_secret_expires_at == null) return error.InvalidResponse;
     var r: Registration = .{ .client_id = wire.client_id, .storage = storage };
     inline for (@typeInfo(Wire).@"struct".field_names) |name| {
         if (comptime !std.mem.eql(u8, name, "client_id")) @field(r, name) = @field(wire, name);
@@ -199,7 +201,11 @@ test "RFC 7591 §3.2.1's response is read, the secret owned" {
     try testing.expectEqualStrings("client_secret_basic", r.token_endpoint_auth_method.?);
     try testing.expectEqual(@as(usize, 2), r.grant_types.?.len);
 
-    try testing.expectError(error.InvalidResponse, readResponse(testing.allocator, 201, "{\"client_id\":\"a\",\"client_secret\":\"b\"}", .{}));
+    // A secret whose expiry the server leaves out is read, its expiry null.
+    var unstated = try readResponse(testing.allocator, 201, "{\"client_id\":\"a\",\"client_secret\":\"b\"}", .{});
+    defer unstated.registered.deinit();
+    try testing.expectEqualStrings("b", unstated.registered.client_secret.?);
+    try testing.expectEqual(@as(?i64, null), unstated.registered.client_secret_expires_at);
     try testing.expectError(error.InvalidResponse, readResponse(testing.allocator, 201, "{\"client_secret\":\"b\"}", .{}));
     const refused = try readResponse(testing.allocator, 400, "{\"error\":\"invalid_redirect_uri\",\"error_description\":\"no\"}", .{});
     try testing.expectEqual(errors.Code.invalid_redirect_uri, refused.refused.code);
