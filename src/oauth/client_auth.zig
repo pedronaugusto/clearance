@@ -208,3 +208,33 @@ test "the method is chosen from what the server lists, basic when it lists nothi
     try std.testing.expectEqual(Method.client_secret_post, choose(&.{ "client_secret_post", "none" }, &.{ .client_secret_post, .none }).?);
     try std.testing.expectEqual(@as(?Method, null), choose(&.{"private_key_jwt"}, &.{.none}));
 }
+
+test "private_key_jwt signs an assertion of the client, for the issuer, briefly" {
+    const cloak = @import("cloak");
+    const jwk = @import("../jwk.zig");
+    const gpa = std.testing.allocator;
+    // RFC 8037 A.1's key, as PKCS#8.
+    var der: [48]u8 = undefined;
+    _ = try std.fmt.hexToBytes(der[0..16], "302e020100300506032b657004220420");
+    _ = try std.base64.url_safe_no_pad.Decoder.decode(der[16..48], "nWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A");
+    const key = try cloak.PrivateKey.parse(gpa, &der, .{});
+    defer key.deinit();
+    const now: std.Io.Timestamp = .{ .nanoseconds = 1_800_000_000 * std.time.ns_per_s };
+    var request = try formRequest(gpa, std.testing.io, .{ .id = "mcp-client", .credentials = .{ .private_key_jwt = .{ .signer = .{ .private = .{ .alg = .eddsa, .key = key } }, .kid = "k1" } } }, &.{.{ .name = "grant_type", .value = "client_credentials" }}, .{ .issuer = "https://as.example", .now = now });
+    defer request.deinit();
+    const body = request.body.expose();
+    try std.testing.expect(std.mem.startsWith(u8, body, "grant_type=client_credentials&client_id=mcp-client&client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer&client_assertion="));
+    const assertion = body[std.mem.find(u8, body, "client_assertion=").? + "client_assertion=".len ..];
+    var set = try jwk.KeySet.parse(gpa, "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"kid\":\"k1\",\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}", .{});
+    defer set.deinit();
+    var scratch: [2048]u8 = undefined;
+    const verified = try jwt.verify(void, assertion, set.keys, .{
+        .algorithms = &.{.eddsa},
+        .issuer = "mcp-client",
+        .subject = "mcp-client",
+        .audience = "https://as.example",
+        .required = .{ .jti = true, .iat = true },
+    }, now, &scratch);
+    try std.testing.expectEqual(@as(?i64, 1_800_000_060), verified.registered.exp);
+    try std.testing.expectEqual(@as(usize, pkce.length), verified.registered.jti.?.len);
+}
