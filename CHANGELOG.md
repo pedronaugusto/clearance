@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-17
+
 ### Changed
 
 - `oauth.bearer.Verifier` answers a token its authorization server will not introspect (`unsupported_token_type`, which oidc-provider gives for the JWT access tokens it issues) with 401 `invalid_token`, the client's to fix, instead of failing with `error.Unavailable` (a 503), which is kept for a server refusing the resource server's credentials or failing. Found running the flows against oidc-provider.
