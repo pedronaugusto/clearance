@@ -1,0 +1,2 @@
+rfc7520/: the JOSE cookbook (RFC 7520) as JSON, https://github.com/ietf-jose/cookbook/tree/13692b68bfc18b99557a5b1ed311fd5077bfff04
+wycheproof/: https://github.com/C2SP/wycheproof/tree/12fd3aaf33eb5fa1f52e026912ee00c054f9d984/testvectors_v1 (Apache-2.0, LICENSE beside them)

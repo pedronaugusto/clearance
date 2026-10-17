@@ -1,0 +1,54 @@
+{
+  "sources": [
+    "src"
+  ],
+  "test_roots": [
+    "src/tests.zig",
+    "src/property_test.zig"
+  ],
+  "test_support": [
+    "src/testing/**"
+  ],
+  "test_dependencies": [
+    "shakedown"
+  ],
+  "shipped": {},
+  "function_exceptions": {},
+  "layout_exceptions": {},
+  "docs": {
+    "zig build docs -- verify": {
+      "source": "examples/usage.zig",
+      "region": "verify",
+      "imports": [
+        "clearance"
+      ]
+    },
+    "zig build docs -- sign": {
+      "source": "examples/usage.zig",
+      "region": "sign",
+      "imports": [
+        "clearance"
+      ]
+    }
+  },
+  "extra_checks": [
+    [
+      "zig",
+      "build",
+      "check-consumer"
+    ]
+  ],
+  "glint": {
+    "rules": [
+      {"id": "P001", "level": "gate"},
+      {"id": "P003", "level": "gate"},
+      {"id": "A001", "level": "gate"},
+      {"id": "A002", "level": "gate"},
+      {"id": "A003", "level": "gate"},
+      {"id": "A004", "level": "gate"},
+      {"id": "A005", "level": "gate"},
+      {"id": "Z013", "level": "gate"},
+      {"id": "Z026", "level": "gate"}
+    ]
+  }
+}

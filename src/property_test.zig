@@ -1,0 +1,85 @@
+//! Properties of every parser of untrusted input, held to a model. Run seeded
+//! in every test run, and by the fuzzer under `bay properties --fuzz`.
+const std = @import("std");
+const shake = @import("shakedown");
+const jws = @import("jws.zig");
+const jwt = @import("jwt.zig");
+const jwk = @import("jwk.zig");
+const Key = @import("Key.zig");
+const Algorithm = @import("Algorithm.zig").Algorithm;
+
+const all = std.enums.values(Algorithm);
+
+const tokens = [_][]const u8{
+    "eyJhbGciOiJFZERTQSJ9.RXhhbXBsZSBvZiBFZDI1NTE5IHNpZ25pbmc.hgyY0il_MGCjP0JzlnLWG1PPOt7-09PGcvMg3AIbQR6dWbhijcNR4ki4iylGjg5BhVsPt9g7sVvpAr_MuM0KAg",
+    "eyJhbGciOiJIUzI1NiIsImtpZCI6ImtpZC1hZXMtc2lnbiJ9.Zm9v.TD37p4c_0jmreSrBSDmE0F3mYSPtkZ3WrSyI5wb_KTg",
+    "eyJhbGciOiJub25lIn0.cGF5bG9hZA.",
+    "eyJhbGciOiJIUzI1NiIsImNyaXQiOlsiZXhwIl0sImV4cCI6MX0.cA.",
+};
+
+const sets = [_][]const u8{
+    "{\"keys\":[{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\",\"kid\":\"ed\"}]}",
+    "{\"kty\":\"oct\",\"k\":\"AyM1SysPpbyDfgZld3umj1qzKObwVMkoqQ-EstJQLr_T-1qS0gZH75aKtMN3Yj0iPS4hcgUuTwjAzZr1Z9CAow\",\"alg\":\"HS256\"}",
+    "{\"kty\":\"EC\",\"crv\":\"P-256\",\"x\":\"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU\",\"y\":\"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0\"}",
+};
+
+/// Any bytes as a token: refused or verified, never more; a verified token's
+/// payload is inside the scratch and its algorithm one the key fits.
+fn anyToken(_: void, c: *shake.Case) !void {
+    var buffer: [512]u8 = undefined;
+    const input = shake.gen.mutated(c.source, &buffer, &tokens);
+    var set = try jwk.KeySet.parse(c.gpa, sets[0], .{});
+    defer set.deinit();
+    const secret: [64]u8 = @splat(1);
+    const keys = [_]Key{ set.keys[0], Key.hmac(&secret) };
+    var scratch: [jws.scratchLength(512)]u8 = undefined;
+    const verified = jws.verify(input, &keys, .{ .algorithms = all }, &scratch) catch return;
+    if (!verified.key.fits(verified.header.alg)) return error.KeyDoesNotFit;
+    const start = @intFromPtr(&scratch);
+    const at = @intFromPtr(verified.payload.ptr);
+    if (verified.payload.len > 0 and (at < start or at + verified.payload.len > start + scratch.len)) return error.PayloadOutsideScratch;
+}
+
+test "any bytes are verified only as a token their key fits, or refused" {
+    try shake.check(std.testing.allocator, {}, anyToken, .{ .cases = 2000 });
+}
+
+/// Any bytes as a key set: refused or read, every key read one that fits some
+/// algorithm, and none left owned after deinit (the test allocator checks).
+fn anyKeySet(_: void, c: *shake.Case) !void {
+    var buffer: [512]u8 = undefined;
+    const input = shake.gen.mutated(c.source, &buffer, &sets);
+    var set = jwk.KeySet.parse(c.gpa, input, .{ .secrets = true }) catch return;
+    defer set.deinit();
+    for (set.keys) |key| {
+        var fits = false;
+        for (all) |alg| fits = fits or key.fits(alg);
+        if (!fits and key.use != .enc) return error.KeyFitsNothing;
+        _ = jwk.thumbprint(key);
+    }
+}
+
+test "any bytes are read as a key set of usable keys, or refused" {
+    try shake.check(std.testing.allocator, {}, anyKeySet, .{ .cases = 2000 });
+}
+
+/// Any claims under a valid signature: accepted or refused by a named check,
+/// never a crash.
+fn anyClaims(_: void, c: *shake.Case) !void {
+    var buffer: [256]u8 = undefined;
+    const claims = shake.gen.mutated(c.source, &buffer, &.{ "{\"exp\":1800000000,\"aud\":[\"a\"],\"iss\":\"x\"}", "{\"nbf\":1.5,\"iat\":-3}" });
+    const secret: [32]u8 = @splat(9);
+    var out: std.Io.Writer.Allocating = .init(c.gpa);
+    defer out.deinit();
+    try jws.sign(c.gpa, std.testing.io, &out.writer, .{}, claims, .{ .hmac = .{ .alg = .hs256, .secret = &secret } });
+    const scratch = try c.gpa.alloc(u8, jws.scratchLength(out.written().len));
+    defer c.gpa.free(scratch);
+    _ = jwt.verify(void, out.written(), &.{Key.hmac(&secret)}, .{ .algorithms = &.{.hs256}, .audience = "a" }, .{ .nanoseconds = 0 }, scratch) catch |err| switch (err) {
+        error.InvalidClaims, error.MissingClaim, error.WrongAudience, error.Expired, error.NotYetValid => return,
+        else => return err,
+    };
+}
+
+test "any claims under a good signature are accepted or refused by a claim check" {
+    try shake.check(std.testing.allocator, {}, anyClaims, .{ .cases = 1000 });
+}

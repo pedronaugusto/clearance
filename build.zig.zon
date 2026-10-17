@@ -1,0 +1,41 @@
+.{
+    .name = .clearance,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.0",
+    .fingerprint = 0x2f4ccbd6f8a602f9, // Changing this has security and trust implications.
+    // What a consumer fetches: the module and its documents. The tests,
+    // vectors, benchmarks, examples and CI stay in the repository, behind
+    // build.zig's own-tree guard.
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "CHANGELOG.md",
+        "LICENSE",
+        "README.md",
+    },
+    .dependencies = .{
+        .aegis = .{
+            .url = "git+https://github.com/pedronaugusto/aegis?ref=v0.1.11#56636db4145754561d287a037b73c045fd087db6",
+            .hash = "aegis-0.1.11-rsxouuXxBwDqlz_tsMEeBAODszKlLvlRoJwCfY-Xh9zg",
+        },
+        .strand = .{
+            .url = "git+https://github.com/pedronaugusto/strand?ref=v0.11.1#b344241da8d6611fd00202250633bc0b97b1e0f6",
+            .hash = "strand-0.11.1-8LNWVtZJJgDujColV9BwoK1duuRMWp4bfuV2Gc2iLTEI",
+        },
+        .cloak = .{
+            .url = "git+https://github.com/pedronaugusto/cloak?ref=ecdsa-p1363#d490f735b298f5a70fcb85c1e71807cc15c28008",
+            .hash = "cloak-0.12.0-9onwcd4HsgOsQHX6cy1UBnuN5EdQu0tkjiYh6IGTV9Wt",
+        },
+    },
+    .dev_dependencies = .{
+        .preflight = .{
+            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.6.3#1c3bddc8c1d82d2eba04a3e67af6c3af18b16344",
+            .hash = "preflight-0.6.3-LX1ZwrzeEADGGrJFgOpe3yb8nrGhhevtGTJckqGILzXn",
+        },
+        .shakedown = .{
+            .url = "git+https://github.com/pedronaugusto/shakedown?ref=v0.4.8#7fd3eda61e991b9e0eb754c1bd83b4ce57f221bd",
+            .hash = "shakedown-0.4.8-BR8U44xTFgCSgGkib258Bq2mgPxBk-drwk5Mg0ABYntZ",
+        },
+    },
+}
