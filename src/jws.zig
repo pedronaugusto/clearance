@@ -177,7 +177,34 @@ fn checkOf(err: VerifyError, found: Check) Check {
 }
 
 fn verifyParts(token: []const u8, keys: []const Key, options: Options, scratch: []u8, diagnostics: *Diagnostics) VerifyError!Verified {
-    const parts = try split(token, options.max_bytes);
+    const read = try readParts(token, options.max_bytes, scratch, diagnostics);
+    const alg = Algorithm.parse(read.wire.alg) orelse {
+        diagnostics.check = .algorithm_unknown;
+        return error.AlgorithmNotAllowed;
+    };
+    if (std.mem.findScalar(Algorithm, options.algorithms, alg) == null) return error.AlgorithmNotAllowed;
+    const header: Header = .{ .alg = alg, .kid = read.wire.kid, .typ = read.wire.typ, .cty = read.wire.cty };
+
+    const key = try select(keys, header);
+    try check(key, alg, read.signing_input, read.signature, options);
+    return .{ .header = header, .payload = read.payload, .key = key, .rest = read.rest };
+}
+
+/// A compact JWS split, its parts decoded and its header read, the
+/// signature not yet looked at.
+const Read = struct {
+    wire: WireHeader,
+    payload: []const u8,
+    signature: []const u8,
+    signing_input: []const u8,
+    rest: []u8,
+};
+
+/// What reading a token's parts can refuse, before any key is chosen.
+const ReadError = error{ Malformed, TooLarge, InvalidHeader, UnsupportedCritical, ScratchTooSmall };
+
+fn readParts(token: []const u8, max_bytes: Bytes, scratch: []u8, diagnostics: *Diagnostics) ReadError!Read {
+    const parts = try split(token, max_bytes);
     if (scratch.len < scratchLength(token.len)) return error.ScratchTooSmall;
     var rest = scratch;
     const header_bytes = try decodePart(&rest, parts.header, diagnostics);
@@ -190,19 +217,44 @@ fn verifyParts(token: []const u8, keys: []const Key, options: Options, scratch: 
         .limits = .{ .depth = 16 },
     }) catch return error.InvalidHeader;
     if (wire.crit.bytes.len != 0) return error.UnsupportedCritical;
-    const alg = Algorithm.parse(wire.alg) orelse {
-        diagnostics.check = .algorithm_unknown;
-        return error.AlgorithmNotAllowed;
-    };
-    if (std.mem.findScalar(Algorithm, options.algorithms, alg) == null) return error.AlgorithmNotAllowed;
-    const header: Header = .{ .alg = alg, .kid = wire.kid, .typ = wire.typ, .cty = wire.cty };
-
-    const key = try select(keys, header);
-    try check(key, alg, parts.signing_input, signature, options);
-    return .{ .header = header, .payload = payload, .key = key, .rest = rest[fixed.end_index..] };
+    return .{ .wire = wire, .payload = payload, .signature = signature, .signing_input = parts.signing_input, .rest = rest[fixed.end_index..] };
 }
 
-fn decodePart(rest: *[]u8, text: []const u8, diagnostics: *Diagnostics) VerifyError![]const u8 {
+/// A JWS read but not verified: its header and payload, for a holder that
+/// passes the token on to the party that verifies it (an ID-JAG on its way
+/// to the authorization server it is for) and checks only that it is what it
+/// asked for. Never a reason to trust its content: `verify` is.
+pub const Inspected = struct {
+    /// The header's `alg` as written: any algorithm but `none`, which a
+    /// signed token never names, clearance's own or not.
+    alg: []const u8,
+    kid: ?[]const u8 = null,
+    typ: ?[]const u8 = null,
+    cty: ?[]const u8 = null,
+    payload: []const u8,
+    /// What of the scratch buffer is still free.
+    rest: []u8,
+};
+
+pub const InspectError = ReadError || error{
+    /// The header's `alg` is `none` or empty, or the signature is empty: not
+    /// a signed token.
+    Unsigned,
+};
+
+/// Reads a compact JWS without verifying it, under the same bounds and the
+/// same header rules as `verify`: three parts of strict base64url, a header
+/// that is a JSON object with a string `alg` and no `crit`. A token without
+/// a signature (`alg` `none`, an empty third part) is refused. Slices live in
+/// `scratch` (at least `scratchLength(token.len)` bytes).
+pub fn inspect(token: []const u8, max_bytes: Bytes, scratch: []u8) InspectError!Inspected {
+    var diagnostics: Diagnostics = .{};
+    const read = try readParts(token, max_bytes, scratch, &diagnostics);
+    if (read.wire.alg.len == 0 or std.ascii.eqlIgnoreCase(read.wire.alg, "none") or read.signature.len == 0) return error.Unsigned;
+    return .{ .alg = read.wire.alg, .kid = read.wire.kid, .typ = read.wire.typ, .cty = read.wire.cty, .payload = read.payload, .rest = read.rest };
+}
+
+fn decodePart(rest: *[]u8, text: []const u8, diagnostics: *Diagnostics) ReadError![]const u8 {
     const length = base64url.decodedLength(text) catch {
         diagnostics.check = .encoding;
         return error.Malformed;
@@ -268,11 +320,27 @@ fn hmac(alg: Algorithm, secret: []const u8, message: []const u8, out: []u8) void
     }
 }
 
-/// What signs: an HMAC secret, or a cloak private key with the algorithm it
-/// signs with.
+/// What signs: an HMAC secret, a cloak private key with the algorithm it
+/// signs with, or a signer outside the process (a KMS, an HSM, an agent),
+/// the key never in clearance's memory.
 pub const Signer = union(enum) {
     hmac: struct { alg: Algorithm, secret: []const u8 },
     private: struct { alg: Algorithm, key: cloak.PrivateKey },
+    external: External,
+
+    /// A signer clearance asks for the signature over the signing input it
+    /// built: the header and claims stay clearance's to write.
+    pub const External = struct {
+        alg: Algorithm,
+        context: ?*anyopaque = null,
+        /// Signs `input` with `alg`, writing the signature as JWS has it
+        /// (ECDSA's `r || s`, RFC 7518 §3.4) into `out`; returns what it
+        /// wrote.
+        sign: *const fn (context: ?*anyopaque, io: std.Io, alg: Algorithm, input: []const u8, out: *[max_signature]u8) error{SigningFailed}![]const u8,
+    };
+
+    /// The longest signature an external signer writes.
+    pub const max_signature = cloak.PrivateKey.max_signature;
 
     pub fn algorithm(s: Signer) Algorithm {
         return switch (s) {
@@ -337,6 +405,11 @@ pub fn sign(gpa: std.mem.Allocator, io: std.Io, out: *Writer, header: SignHeader
                 error.UnsupportedAlgorithm => error.InvalidKey,
                 error.InvalidNoise, error.SigningFailed => error.SigningFailed,
             };
+        },
+        .external => |e| blk: {
+            const written = try e.sign(e.context, io, alg, signing_input, &signature_buffer);
+            if (written.len == 0) return error.SigningFailed;
+            break :blk written;
         },
     };
     defer std.crypto.secureZero(u8, &signature_buffer);

@@ -156,3 +156,51 @@ test "verifying allocates nothing and needs only the scratch it asks for" {
     _ = try jws.verify(ed_token, set.keys, .{ .algorithms = &.{.eddsa} }, scratch[0..length]);
     try std.testing.expectError(error.ScratchTooSmall, jws.verify(ed_token, set.keys, .{ .algorithms = &.{.eddsa} }, scratch[0 .. length - 1]));
 }
+
+test "inspect reads a token it cannot verify, and refuses one that is not signed or not well formed" {
+    var scratch: [4096]u8 = undefined;
+    // RFC 7520 4.3's ES512 token: an algorithm clearance does not verify, read all the same.
+    var buffer: [4096]u8 = undefined;
+    const es512 = try cookbookCompact("4_3.ecdsa_signature.json", &buffer);
+    const read = try jws.inspect(es512, .literal("16KiB"), &scratch);
+    try std.testing.expectEqualStrings("ES512", read.alg);
+    try std.testing.expectEqualStrings(cookbook_payload, read.payload);
+    const ed = try jws.inspect(ed_token, .literal("16KiB"), &scratch);
+    try std.testing.expectEqualStrings("EdDSA", ed.alg);
+    try std.testing.expectEqualStrings("Example of Ed25519 signing", ed.payload);
+
+    // {"alg":"none"}, {"alg":"NONE"}, {"alg":""}, and a token with no signature.
+    try std.testing.expectError(error.Unsigned, jws.inspect("eyJhbGciOiJub25lIn0.cGF5bG9hZA.c2ln", .literal("16KiB"), &scratch));
+    try std.testing.expectError(error.Unsigned, jws.inspect("eyJhbGciOiJOT05FIn0.cGF5bG9hZA.c2ln", .literal("16KiB"), &scratch));
+    try std.testing.expectError(error.Unsigned, jws.inspect("eyJhbGciOiIifQ.cGF5bG9hZA.c2ln", .literal("16KiB"), &scratch));
+    try std.testing.expectError(error.Unsigned, jws.inspect("eyJhbGciOiJFZERTQSJ9.cGF5bG9hZA.", .literal("16KiB"), &scratch));
+    try std.testing.expectError(error.Malformed, jws.inspect("eyJhbGciOiJFZERTQSJ9.cGF5bG9hZA", .literal("16KiB"), &scratch));
+    try std.testing.expectError(error.Malformed, jws.inspect("eyJhbGciOiJFZERTQSJ9.cGF5bG9hZA.c2ln.x", .literal("16KiB"), &scratch));
+    try std.testing.expectError(error.TooLarge, jws.inspect(ed_token, .literal("64B"), &scratch));
+    // {"alg":"HS256","crit":["exp"],"exp":1}
+    try std.testing.expectError(error.UnsupportedCritical, jws.inspect("eyJhbGciOiJIUzI1NiIsImNyaXQiOlsiZXhwIl0sImV4cCI6MX0.cA.c2ln", .literal("16KiB"), &scratch));
+    try std.testing.expectError(error.ScratchTooSmall, jws.inspect(ed_token, .literal("16KiB"), scratch[0..16]));
+}
+
+test "an external signer signs what clearance built, and its token verifies" {
+    const Kms = struct {
+        key: cloak.PrivateKey,
+        calls: u32 = 0,
+        fn sign(context: ?*anyopaque, io: std.Io, alg: Algorithm, input: []const u8, out: *[jws.Signer.max_signature]u8) error{SigningFailed}![]const u8 {
+            _ = io;
+            const kms: *@This() = @ptrCast(@alignCast(context.?)); // safe: the test passes its own Kms
+            kms.calls += 1;
+            if (alg != .eddsa) return error.SigningFailed;
+            return kms.key.sign(alg.signature(), input, &.{}, out) catch error.SigningFailed;
+        }
+    };
+    var kms: Kms = .{ .key = try edPrivate() };
+    defer kms.key.deinit();
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try jws.sign(gpa, std.testing.io, &out.writer, .{}, "Example of Ed25519 signing", .{ .external = .{ .alg = .eddsa, .context = &kms, .sign = Kms.sign } });
+    // Ed25519 is deterministic: the RFC's own token.
+    try std.testing.expectEqualStrings(ed_token, out.written());
+    try std.testing.expectEqual(@as(u32, 1), kms.calls);
+    try std.testing.expectError(error.SigningFailed, jws.sign(gpa, std.testing.io, &out.writer, .{}, "x", .{ .external = .{ .alg = .es256, .context = &kms, .sign = Kms.sign } }));
+}

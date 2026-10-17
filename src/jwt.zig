@@ -136,7 +136,7 @@ pub fn verify(comptime Claims: type, token: []const u8, keys: []const Key, valid
         .min_rsa_bits = validation.min_rsa_bits,
         .diagnostics = &diagnostics,
     }, scratch);
-    return readClaims(Claims, verified, validation, now) catch |err| {
+    const read = readClaims(Claims, verified.header.typ, verified.payload, verified.rest, inspectionOf(validation), now) catch |err| {
         diagnostics.check = switch (err) {
             error.InvalidClaims => .claims,
             error.WrongType => .type,
@@ -147,36 +147,104 @@ pub fn verify(comptime Claims: type, token: []const u8, keys: []const Key, valid
             error.NotYetValid => .not_yet_valid,
             error.TooOld => .too_old,
             error.MissingClaim => .required,
-
-            else => diagnostics.check,
         };
         return err;
     };
+    return .{ .header = verified.header, .registered = read.registered, .claims = read.claims, .key = verified.key, .payload = verified.payload, .rest = read.rest };
 }
 
-fn readClaims(comptime Claims: type, verified: jws.Verified, validation: Validation, now: std.Io.Timestamp) VerifyError!Verified(Claims) {
-    if (validation.typ) |expected| {
-        const typ = verified.header.typ orelse return error.WrongType;
-        if (!mediaTypeIs(typ, expected)) return error.WrongType;
+/// The checks of a token's type and claims: a `Validation` without the
+/// signature's part, for `inspect`.
+pub const Inspection = struct {
+    issuer: ?[]const u8 = null,
+    audience: ?[]const u8 = null,
+    subject: ?[]const u8 = null,
+    typ: ?[]const u8 = null,
+    required: Required = .{},
+    leeway: Duration = .literal("0s"),
+    max_age: ?Duration = null,
+    ignore_unknown_claims: bool = true,
+    max_bytes: aegis.units.Bytes(usize) = .literal("16KiB"),
+};
+
+fn inspectionOf(v: Validation) Inspection {
+    return .{
+        .issuer = v.issuer,
+        .audience = v.audience,
+        .subject = v.subject,
+        .typ = v.typ,
+        .required = v.required,
+        .leeway = v.leeway,
+        .max_age = v.max_age,
+        .ignore_unknown_claims = v.ignore_unknown_claims,
+        .max_bytes = v.max_bytes,
+    };
+}
+
+pub fn Inspected(comptime Claims: type) type {
+    return struct {
+        header: jws.Inspected,
+        registered: Registered,
+        claims: Claims,
+        /// What of the scratch buffer is still free.
+        rest: []u8,
+    };
+}
+
+pub const InspectError = jws.InspectError || error{
+    InvalidClaims,
+    WrongType,
+    WrongIssuer,
+    WrongAudience,
+    WrongSubject,
+    Expired,
+    NotYetValid,
+    TooOld,
+    MissingClaim,
+};
+
+/// Reads a JWT without verifying its signature (`jws.inspect`), its type and
+/// claims checked as `verify` checks them. For a token on its way to the
+/// party that verifies it, whose holder checks it is what it asked for;
+/// never a reason to trust its content. Strings borrow from `scratch` (at
+/// least `jws.scratchLength(token.len)` bytes).
+pub fn inspect(comptime Claims: type, token: []const u8, inspection: Inspection, now: std.Io.Timestamp, scratch: []u8) InspectError!Inspected(Claims) {
+    const leeway_seconds: u32 = inspection.leeway.raw();
+    std.debug.assert(leeway_seconds <= 300);
+    const header = try jws.inspect(token, inspection.max_bytes, scratch);
+    const read = try readClaims(Claims, header.typ, header.payload, header.rest, inspection, now);
+    return .{ .header = header, .registered = read.registered, .claims = read.claims, .rest = read.rest };
+}
+
+const ClaimsError = error{ InvalidClaims, WrongType, WrongIssuer, WrongAudience, WrongSubject, Expired, NotYetValid, TooOld, MissingClaim };
+
+fn ReadClaims(comptime Claims: type) type {
+    return struct { registered: Registered, claims: Claims, rest: []u8 };
+}
+
+fn readClaims(comptime Claims: type, typ: ?[]const u8, payload: []const u8, rest: []u8, inspection: Inspection, now: std.Io.Timestamp) ClaimsError!ReadClaims(Claims) {
+    if (inspection.typ) |expected| {
+        const named = typ orelse return error.WrongType;
+        if (!mediaTypeIs(named, expected)) return error.WrongType;
     }
-    var fixed: std.heap.FixedBufferAllocator = .init(verified.rest);
+    var fixed: std.heap.FixedBufferAllocator = .init(rest);
     const arena = fixed.allocator();
     const options: strand.json.ParseOptions = .{ .ignore_unknown_fields = true, .limits = .{ .depth = 32 } };
-    const wire = strand.json.parseLeaky(WireRegistered, arena, verified.payload, options) catch return error.InvalidClaims;
+    const wire = strand.json.parseLeaky(WireRegistered, arena, payload, options) catch return error.InvalidClaims;
     const registered = try readRegistered(arena, wire);
-    try checkRegistered(registered, validation, now);
-    const claims: Claims = if (Claims == void) {} else strand.json.parseLeaky(Claims, arena, verified.payload, .{
-        .ignore_unknown_fields = validation.ignore_unknown_claims,
+    try checkRegistered(registered, inspection, now);
+    const claims: Claims = if (Claims == void) {} else strand.json.parseLeaky(Claims, arena, payload, .{
+        .ignore_unknown_fields = inspection.ignore_unknown_claims,
         .limits = .{ .depth = 32 },
     }) catch return error.InvalidClaims;
-    return .{ .header = verified.header, .registered = registered, .claims = claims, .key = verified.key, .payload = verified.payload, .rest = verified.rest[fixed.end_index..] };
+    return .{ .registered = registered, .claims = claims, .rest = rest[fixed.end_index..] };
 }
 
 fn present(raw: strand.json.Raw) bool {
     return raw.bytes.len != 0;
 }
 
-fn readRegistered(arena: std.mem.Allocator, wire: WireRegistered) VerifyError!Registered {
+fn readRegistered(arena: std.mem.Allocator, wire: WireRegistered) ClaimsError!Registered {
     const opts: strand.json.ParseOptions = .{};
     var r: Registered = .{};
     inline for (.{ "iss", "sub", "jti" }) |name| {
@@ -202,7 +270,7 @@ fn readRegistered(arena: std.mem.Allocator, wire: WireRegistered) VerifyError!Re
 /// A NumericDate (RFC 7519 §2): a JSON number of seconds, a fraction allowed
 /// and dropped toward the past. Anything else, or a value no clock reaches,
 /// refuses the token.
-pub fn numericDate(bytes: []const u8) VerifyError!i64 {
+pub fn numericDate(bytes: []const u8) error{InvalidClaims}!i64 {
     const text = std.mem.trim(u8, bytes, " \t\r\n");
     if (text.len == 0 or text.len > 32) return error.InvalidClaims;
     if (text[0] != '-' and !std.ascii.isDigit(text[0])) return error.InvalidClaims;
@@ -214,7 +282,7 @@ pub fn numericDate(bytes: []const u8) VerifyError!i64 {
     return @intFromFloat(@floor(value));
 }
 
-fn checkRegistered(r: Registered, v: Validation, now: std.Io.Timestamp) VerifyError!void {
+fn checkRegistered(r: Registered, v: Inspection, now: std.Io.Timestamp) ClaimsError!void {
     const seconds: i64 = @intCast(@divFloor(now.nanoseconds, std.time.ns_per_s));
     const leeway: i64 = v.leeway.raw();
     const required = v.required;

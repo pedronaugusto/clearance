@@ -95,3 +95,31 @@ test "custom claims read into the caller's type; a claims type that does not fit
     try std.testing.expectError(error.InvalidClaims, jwt.verify(Wrong, out.written(), &keys, .{ .algorithms = &.{.hs256}, .diagnostics = &diagnostics }, now, &scratch));
     try std.testing.expectEqual(jws.Check.claims, diagnostics.check);
 }
+
+test "inspect checks type and claims as verify does, with no key and any signature" {
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try token(&out, "{\"iss\":\"https://idp.example\",\"aud\":\"https://as.example\",\"exp\":1700000060,\"client_id\":\"c\"}", "oauth-id-jag+jwt");
+    // The signature is not looked at: another secret's token reads the same.
+    const written = out.written();
+    var forged: [512]u8 = undefined;
+    const tail = std.mem.findScalarLast(u8, written, '.').?;
+    @memcpy(forged[0 .. tail + 1], written[0 .. tail + 1]);
+    @memcpy(forged[tail + 1 ..][0..4], "AAAA");
+    const other = forged[0 .. tail + 5];
+    var scratch: [4096]u8 = undefined;
+    const C = struct { client_id: []const u8 };
+    const expected: jwt.Inspection = .{ .issuer = "https://idp.example", .audience = "https://as.example", .typ = "oauth-id-jag+jwt" };
+    for ([_][]const u8{ written, other }) |t| {
+        const read = try jwt.inspect(C, t, expected, now, &scratch);
+        try std.testing.expectEqualStrings("HS256", read.header.alg);
+        try std.testing.expectEqualStrings("c", read.claims.client_id);
+        try std.testing.expectEqual(@as(?i64, 1700000060), read.registered.exp);
+    }
+    try std.testing.expectError(error.WrongType, jwt.inspect(C, written, .{ .audience = "https://as.example", .typ = "at+jwt" }, now, &scratch));
+    try std.testing.expectError(error.WrongIssuer, jwt.inspect(C, written, .{ .issuer = "https://evil.example", .audience = "https://as.example" }, now, &scratch));
+    try std.testing.expectError(error.WrongAudience, jwt.inspect(C, written, .{ .audience = "https://other.example" }, now, &scratch));
+    try std.testing.expectError(error.Expired, jwt.inspect(C, written, expected, .{ .nanoseconds = 1_700_000_060 * std.time.ns_per_s }, &scratch));
+    try std.testing.expectError(error.InvalidClaims, jwt.inspect(struct { client_id: u32 }, written, expected, now, &scratch));
+    try std.testing.expectError(error.Unsigned, jwt.inspect(void, "eyJhbGciOiJub25lIn0.e30.", .{}, now, &scratch));
+}

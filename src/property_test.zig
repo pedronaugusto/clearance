@@ -83,3 +83,32 @@ fn anyClaims(_: void, c: *shake.Case) !void {
 test "any claims under a good signature are accepted or refused by a claim check" {
     try shake.check(std.testing.allocator, {}, anyClaims, .{ .cases = 1000 });
 }
+
+/// Any bytes through `inspect`: refused, or read as a signed token whose
+/// payload is inside the scratch; and every token `verify` takes, `inspect`
+/// reads the same.
+fn anyInspected(_: void, c: *shake.Case) !void {
+    var buffer: [512]u8 = undefined;
+    const input = shake.gen.mutated(c.source, &buffer, &tokens);
+    var scratch: [jws.scratchLength(512)]u8 = undefined;
+    var verify_scratch: [jws.scratchLength(512)]u8 = undefined;
+    var set = try jwk.KeySet.parse(c.gpa, sets[0], .{});
+    defer set.deinit();
+    const secret: [64]u8 = @splat(1);
+    const keys = [_]Key{ set.keys[0], Key.hmac(&secret) };
+    const verified: ?jws.Verified = jws.verify(input, &keys, .{ .algorithms = all }, &verify_scratch) catch null;
+    const read = jws.inspect(input, .literal("16KiB"), &scratch) catch {
+        if (verified != null) return error.VerifiedButNotRead;
+        return;
+    };
+    if (read.alg.len == 0 or std.ascii.eqlIgnoreCase(read.alg, "none")) return error.UnsignedRead;
+    const start = @intFromPtr(&scratch);
+    const at = @intFromPtr(read.payload.ptr);
+    if (read.payload.len > 0 and (at < start or at + read.payload.len > start + scratch.len)) return error.PayloadOutsideScratch;
+    if (verified) |v| if (!std.mem.eql(u8, v.payload, read.payload)) return error.PayloadsDiffer;
+    _ = jwt.inspect(void, input, .{ .required = .{ .exp = false } }, .{ .nanoseconds = 0 }, &scratch) catch return;
+}
+
+test "any bytes are read by inspect as a signed token, or refused; what verifies is read the same" {
+    try shake.check(std.testing.allocator, {}, anyInspected, .{ .cases = 2000 });
+}
