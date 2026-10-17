@@ -1,11 +1,13 @@
 # clearance
 
-clearance is OAuth 2.1 and JOSE (JWT, JWS, JWK) for Zig. This first release is
-the JOSE layer: JSON Web Keys and key sets, JWS in the compact serialization,
-signed and verified, and JWTs whose claims are checked by type before value.
-The OAuth client flows, discovery, protected-resource metadata, dynamic client
-registration, the resource server's bearer checks, ID tokens and DPoP follow on
-the same layers.
+clearance is OAuth 2.1 and JOSE (JWT, JWS, JWK) for Zig. It has the JOSE
+layer: JSON Web Keys and key sets, JWS in the compact serialization, signed
+and verified, and JWTs whose claims are checked by type before value; and
+OAuth 2.1's messages without I/O: metadata, PKCE, the authorization request
+and its callback, token requests and responses, client authentication,
+registration, introspection and bearer challenges, for any HTTP stack. The
+flows performed on uplink's client, remote key sets, ID tokens and the
+resource server's bearer checks follow on the same layers.
 
 Work in progress toward the public cut.
 
@@ -15,8 +17,10 @@ Requires Zig 0.17.0. Fetch with `zig fetch --save
 git+https://github.com/pedronaugusto/clearance`, then take the `clearance`
 module through `b.dependency` and add it to your executable's imports. It
 depends on std, [cloak](https://github.com/pedronaugusto/cloak) (signatures),
-[strand](https://github.com/pedronaugusto/strand) (JSON) and
-[aegis](https://github.com/pedronaugusto/aegis) (checked types).
+[strand](https://github.com/pedronaugusto/strand) (JSON),
+[aegis](https://github.com/pedronaugusto/aegis) (checked types) and
+[uplink](https://github.com/pedronaugusto/uplink)'s codecs alone
+(`uplink.wire`: URLs, forms, challenges; not its client).
 
 ## Usage
 
@@ -98,22 +102,40 @@ try jwt.sign(gpa, io, &token.writer, .{ .kid = "hmac-1" }, .{
   of a set and counted by reason, so a provider's set still serves.
 - **Critical extensions are refused.** clearance understands no header that
   must be listed in `crit`.
+- **What was asked is what answered.** Authorization server metadata must
+  name the issuer it was fetched for, byte for byte; protected resource
+  metadata the resource asked for; every endpoint is HTTPS (HTTP to loopback
+  alone). A callback is read only under the request's `state`, and its `iss`
+  (RFC 9207) is compared as a string, required when the server advertises it.
+- **Secrets in wiped memory.** Token requests (client secrets, verifiers,
+  refresh tokens) and token sets live in aegis secret memory; `state` and
+  `nonce` compare in constant time.
 
 ## Scope
 
 In this release: JWS compact serialization with HS256/384/512, RS256/384/512,
 PS256/384/512, ES256, ES384 and EdDSA (Ed25519, under both its names); JWK
 and JWK sets (RSA, EC P-256 and P-384, OKP Ed25519, oct); thumbprints (RFC
-7638) and their URIs (RFC 9278); JWT claims and explicit typing.
+7638) and their URIs (RFC 9278); JWT claims and explicit typing. OAuth 2.1
+messages: RFC 8414 and OpenID Connect Discovery metadata, RFC 9728 protected
+resource metadata, PKCE (S256), the authorization request with RFC 8707
+resources and its callback with RFC 9207's `iss`, the authorization code,
+refresh and client credentials grants, client authentication (none,
+`client_secret_basic`, `client_secret_post`, `private_key_jwt`), RFC 7591
+registration, client ID metadata documents, RFC 7662 introspection, RFC 6750
+challenges with `resource_metadata`.
 
 Not built: JWE; ES512, ES256K and Ed448; the JWS JSON serialization; unencoded
-payloads (RFC 7797).
+payloads (RFC 7797); an authorization server; device authorization, token
+revocation, token exchange, the JWT-bearer grant, DPoP, PAR and
+`client_secret_jwt`, until a user needs one.
 
 ## Built with
 
 cloak verifies and signs (ECDSA in the fixed-width form JOSE uses, RSA
 PKCS#1 v1.5 and PSS, Ed25519); strand reads and writes JSON under limits;
-aegis wipes secrets and compares MACs in constant time;
+aegis wipes secrets and compares MACs in constant time; uplink's codecs
+parse URLs and challenges and encode forms;
 [shakedown](https://github.com/pedronaugusto/shakedown) runs the tests and
 properties; [preflight](https://github.com/pedronaugusto/preflight) gates it.
 
@@ -122,7 +144,8 @@ properties; [preflight](https://github.com/pedronaugusto/preflight) gates it.
 `bay test` runs the suite: the examples of RFC 7520 (the JOSE cookbook), 7638
 and 8037, Wycheproof's `json_web_signature`, `json_web_key` and
 `json_web_crypto` files, and properties over every parser of untrusted input
-(tokens, key sets, claims), which `bay properties --fuzz` runs under Zig's
+(tokens, key sets, claims, metadata, token, registration and introspection
+responses, callbacks, challenges), which `bay properties --fuzz` runs under Zig's
 fuzzer.
 
 ## Licence
