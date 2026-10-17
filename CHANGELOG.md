@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `oauth.registration.ClientMetadata.application_type` (`native` or `web`, OpenID Connect Dynamic Client Registration §2), which MCP asks every client to name when it registers.
+
 ## [0.2.2] - 2026-10-17
 
 ### Changed

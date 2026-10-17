@@ -27,7 +27,13 @@ pub const ClientMetadata = struct {
     jwks: ?strand.json.Raw = null,
     software_id: ?[]const u8 = null,
     software_version: ?[]const u8 = null,
+    /// OpenID Connect Dynamic Client Registration §2: `native` for an
+    /// application on the user's device, `web` for one a server runs; MCP
+    /// asks every client to name it when it registers.
+    application_type: ?ApplicationType = null,
 };
+
+pub const ApplicationType = enum { native, web };
 
 pub const WriteError = std.Io.Writer.Error || error{
     /// `jwks` is not one JSON value.
@@ -168,6 +174,13 @@ test "a client ID metadata document carries its own URL" {
     try writeDocument(&out.writer, "https://app.example/client.json", .{ .client_name = "App", .redirect_uris = &.{"http://127.0.0.1/cb"}, .token_endpoint_auth_method = "none" });
     try testing.expectEqualStrings("{\"redirect_uris\":[\"http://127.0.0.1/cb\"],\"token_endpoint_auth_method\":\"none\",\"client_name\":\"App\",\"client_id\":\"https://app.example/client.json\"}", out.written());
     try testing.expectError(error.InvalidClientId, writeDocument(&out.writer, "http://app.example/client.json", .{}));
+}
+
+test "an application type is written by its name" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try writeRequest(&out.writer, .{ .client_name = "cli", .application_type = .native });
+    try testing.expectEqualStrings("{\"client_name\":\"cli\",\"application_type\":\"native\"}", out.written());
 }
 
 test "RFC 7591 §3.2.1's response is read, the secret owned" {
