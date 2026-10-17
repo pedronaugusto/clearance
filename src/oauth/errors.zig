@@ -46,7 +46,8 @@ pub fn Text(comptime capacity: usize) type {
         const Self = @This();
 
         pub fn init(text: []const u8) Self {
-            var t: Self = .{};
+            // `set` writes every field; a literal would zero the bytes first.
+            var t: Self = undefined;
             t.set(text);
             return t;
         }

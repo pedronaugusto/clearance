@@ -173,7 +173,7 @@ pub const TokenSet = struct {
 
     /// A set from what `write` wrote.
     pub fn read(gpa: std.mem.Allocator, json: []const u8) ReadError!TokenSet {
-        var scratch: Scratch = .{};
+        var scratch: Scratch = undefined;
         try scratch.init(gpa, json.len);
         defer scratch.deinit();
         const stored = strand.json.parseLeaky(Stored, scratch.allocator(), json, .{ .limits = .{ .depth = 4 } }) catch return error.InvalidResponse;
@@ -246,7 +246,7 @@ pub fn readResponse(gpa: std.mem.Allocator, status: u16, body: []const u8, optio
         if (body.len <= 4096) if (errors.readJson(body, &scratch)) |e| return .{ .refused = e };
         return error.UnexpectedStatus;
     }
-    var scratch: Scratch = .{};
+    var scratch: Scratch = undefined;
     try scratch.init(gpa, body.len);
     defer scratch.deinit();
     const wire = strand.json.parseLeaky(Wire, scratch.allocator(), body, .{
@@ -277,14 +277,19 @@ fn scratchLength(length: usize) usize {
 /// what the parser wrote is wiped from the stack: strings it unescaped, so a
 /// response without escapes costs no allocation and no wipe.
 const Scratch = struct {
-    stack: [scratchLength(2048)]u8 = undefined,
-    heap: ?aegis.SecretBytes = null,
-    fixed: std.heap.FixedBufferAllocator = undefined,
+    stack: [scratchLength(2048)]u8,
+    heap: ?aegis.SecretBytes,
+    fixed: std.heap.FixedBufferAllocator,
     /// The furthest the parser has written: a shrink or a free moves the
     /// fixed allocator's end back, never this.
-    high: usize = 0,
+    high: usize,
 
+    /// Sets up `s` in place, its stack left as it is: a struct literal
+    /// would fill the whole buffer with zeros first, more work than the
+    /// parse itself.
     fn init(s: *Scratch, gpa: std.mem.Allocator, length: usize) std.mem.Allocator.Error!void {
+        s.heap = null;
+        s.high = 0;
         const capacity = scratchLength(length);
         if (capacity <= s.stack.len) {
             s.fixed = .init(s.stack[0..capacity]);
