@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-17
+
+### Changed
+
+- `oauth.token.readResponse` and `TokenSet.read` parse a response of up to 2 KiB on the stack, wiping only what the parser wrote (the strings it unescaped), instead of allocating and wiping a heap buffer of twice the body and 4 KiB: one allocation per response (the set's own) and about a fifth less time (433 to 352 ns for a 1 KiB response on an M3). Larger responses still parse in wiped heap memory.
+- The benchmarks time OAuth's messages: a token response read, RFC 8414's example metadata read, an authorization URL written.
+
 ## [0.2.0] - 2026-10-17
 
 ### Breaking
