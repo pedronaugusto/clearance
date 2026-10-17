@@ -4,6 +4,8 @@ const std = @import("std");
 const shake = @import("shakedown");
 const oauth = @import("../oauth.zig");
 const form = @import("uplink.wire").form;
+const aegis = @import("aegis");
+const clearance = @import("clearance");
 
 const as_documents = [_][]const u8{
     "{\"issuer\":\"https://as.example\",\"token_endpoint\":\"https://as.example/token\",\"code_challenge_methods_supported\":[\"S256\"],\"authorization_response_iss_parameter_supported\":true}",
@@ -202,4 +204,112 @@ fn anyAuthorization(_: void, c: *shake.Case) !void {
 
 test "any Authorization value gives a token only as RFC 6750's b64token" {
     try shake.check(std.testing.allocator, {}, anyAuthorization, .{ .cases = 2000 });
+}
+
+/// Any bytes as a token exchange's answer: the issued token with its types,
+/// the server's error, or refused; nothing left owned.
+fn anyExchangeResponse(_: void, c: *shake.Case) !void {
+    var buffer: [512]u8 = undefined;
+    const input = shake.gen.mutated(c.source, &buffer, &.{
+        "{\"access_token\":\"a.b\\u002ec\",\"issued_token_type\":\"urn:ietf:params:oauth:token-type:id-jag\",\"token_type\":\"N_A\",\"expires_in\":300,\"scope\":\"s\",\"refresh_token\":\"r\"}",
+        "{\"error\":\"insufficient_user_authentication\",\"error_description\":\"again\"}",
+    });
+    const status: u16 = if (shake.gen.boolean(c.source)) 200 else 400;
+    var response = oauth.exchange.readResponse(c.gpa, status, input, .{ .now = .{ .nanoseconds = 0 } }) catch return;
+    switch (response) {
+        .issued => |*i| {
+            defer i.deinit();
+            if (i.token.len == 0 or i.issued_token_type.len == 0 or i.token_type.len == 0) return error.EmptyMember;
+        },
+        .refused => |e| if (e.name.len == 0) return error.EmptyError,
+    }
+}
+
+test "any bytes are read as a token exchange's answer, the server's error, or refused" {
+    try shake.check(std.testing.allocator, {}, anyExchangeResponse, .{ .cases = 1000 });
+}
+
+const jag_request: oauth.id_jag.Request = .{
+    .idp_issuer = "https://idp.example",
+    .subject_token = "id",
+    .audience = "https://as.example",
+    .client_id = "mcp-client",
+    .resource = "https://mcp.example/mcp",
+    .scope = "a b",
+};
+const jag_now_s: i64 = 1_800_000_000;
+
+/// Any answer from an identity provider, built around a good ID-JAG (signed
+/// with HS256: the client does not verify it) and mutated: an ID-JAG only
+/// for what was asked, never more scope, unexpired; or the provider's error,
+/// or refused.
+fn anyIdJagAnswer(_: void, c: *shake.Case) !void {
+    const secret: [32]u8 = @splat(3);
+    var assertion: std.Io.Writer.Allocating = .init(c.gpa);
+    defer assertion.deinit();
+    try clearance.jwt.sign(c.gpa, std.testing.io, &assertion.writer, .{ .typ = oauth.id_jag.typ }, .{
+        .iss = jag_request.idp_issuer,
+        .sub = "u",
+        .aud = jag_request.audience,
+        .client_id = jag_request.client_id,
+        .jti = "j",
+        .iat = jag_now_s,
+        .exp = jag_now_s + 300,
+        .resource = jag_request.resource,
+        .scope = "a",
+    }, .{ .hmac = .{ .alg = .hs256, .secret = &secret } });
+    var seed: std.Io.Writer.Allocating = .init(c.gpa);
+    defer seed.deinit();
+    try seed.writer.print("{{\"access_token\":\"{s}\",\"issued_token_type\":\"urn:ietf:params:oauth:token-type:id-jag\",\"token_type\":\"N_A\",\"scope\":\"a\"}}", .{assertion.written()});
+    var buffer: [1024]u8 = undefined;
+    const input = shake.gen.mutated(c.source, &buffer, &.{ seed.written(), "{\"error\":\"invalid_grant\"}" });
+    const status: u16 = if (shake.gen.boolean(c.source)) 200 else 400;
+    const now: std.Io.Timestamp = .{ .nanoseconds = jag_now_s * std.time.ns_per_s };
+    var response = oauth.id_jag.readIssued(c.gpa, status, input, jag_request, .{ .now = now }) catch return;
+    switch (response) {
+        .granted => |*g| {
+            defer g.deinit();
+            if (g.expired(now)) return error.ExpiredGranted;
+            if (g.scope) |s| {
+                var it = std.mem.tokenizeScalar(u8, s, ' ');
+                while (it.next()) |one| if (!oauth.challenge.contains(jag_request.scope.?, one)) return error.ScopeWidened;
+            }
+            var scratch: [2048]u8 = undefined;
+            const read = try clearance.jwt.inspect(struct { client_id: []const u8 }, g.assertion, .{ .issuer = jag_request.idp_issuer, .audience = jag_request.audience, .typ = oauth.id_jag.typ }, now, &scratch);
+            if (!std.mem.eql(u8, read.claims.client_id, jag_request.client_id)) return error.OtherClient;
+        },
+        .refused => {},
+    }
+}
+
+test "any identity provider's answer is an ID-JAG for what was asked, its error, or refused" {
+    try shake.check(std.testing.allocator, {}, anyIdJagAnswer, .{ .cases = 1000 });
+}
+
+/// Any answer to a redemption: a Bearer token with no refresh token and no
+/// more scope than the ID-JAG's, the server's error, or refused.
+fn anyRedemption(_: void, c: *shake.Case) !void {
+    var buffer: [512]u8 = undefined;
+    const input = shake.gen.mutated(c.source, &buffer, &.{
+        "{\"access_token\":\"at\",\"token_type\":\"Bearer\",\"expires_in\":60,\"scope\":\"a\",\"refresh_token\":\"r\",\"resource\":\"https://mcp.example/mcp\"}",
+        "{\"access_token\":\"at\",\"token_type\":\"bearer\",\"resource\":[\"https://mcp.example/mcp\"],\"authorization_details\":[]}",
+        "{\"error\":\"invalid_grant\"}",
+    });
+    var grant: oauth.id_jag.Grant = .{ .assertion = "", .scope = "a b", .expires_at = jag_now_s + 300, .storage = try aegis.SecretBytes.init(c.gpa, 0) };
+    defer grant.deinit();
+    const status: u16 = if (shake.gen.boolean(c.source)) 200 else 400;
+    var response = oauth.id_jag.readRedemption(c.gpa, status, input, &grant, jag_request.resource, .{ .now = .{ .nanoseconds = 0 } }) catch return;
+    switch (response) {
+        .tokens => |*set| {
+            defer set.deinit();
+            if (set.refresh_token != null) return error.RefreshTokenKept;
+            var it = std.mem.tokenizeScalar(u8, set.scope orelse "", ' ');
+            while (it.next()) |one| if (!oauth.challenge.contains(grant.scope.?, one)) return error.ScopeWidened;
+        },
+        .refused => {},
+    }
+}
+
+test "any answer to a redemption is a Bearer token within the ID-JAG's scope, the server's error, or refused" {
+    try shake.check(std.testing.allocator, {}, anyRedemption, .{ .cases = 1000 });
 }

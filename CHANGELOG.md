@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `oauth.client_auth.Method` and `Credentials` gain `client_secret_jwt`, `jws.Signer` gains `external`, `oauth.errors.Code` gains `invalid_target` and `insufficient_user_authentication`, `oauth.token.Grant` gains `token_exchange` and `jwt_bearer`: an exhaustive switch over any of them needs the new cases.
+
+### Added
+
+- MCP's enterprise-managed authorization, as the Identity Assertion JWT Authorization Grant (draft-ietf-oauth-identity-assertion-authz-grant-04) gives it: `oauth.requestIdJag` exchanges the user's token at an identity provider (an ID token, a SAML assertion or a refresh token) for an ID-JAG (RFC 8693), checked for exactly what was asked (the provider as issuer, the authorization server as its sole audience, the client, the resource alone, no scope beyond the request, unexpired, no `authorization_details`); `oauth.redeemIdJag` redeems it with that authorization server (RFC 7523), the assertion alone carrying scope and resource, and holds the access token to Bearer, the resource and the assertion's scope, keeping no refresh token. The messages in `oauth.id_jag`, sans I/O.
+- `oauth.jwtBearer`: a JWT as the grant (RFC 7523 §2.1), with a client or with none, for a workload's identity token (MCP's workload identity federation).
+- `oauth.exchange`: token exchange (RFC 8693), its request as `token.Grant.token_exchange` and its answer read (`readResponse`), the token type identifiers.
+- `client_secret_jwt` client authentication (an HS256 assertion under the client's secret), and `jws.Signer.external`: a signer outside the process (a KMS, an HSM) that signs the input clearance built, for `private_key_jwt` or any JWT.
+- `jws.inspect` and `jwt.inspect`: a token read and its type and claims checked under `verify`'s bounds and rules, its signature not verified, for a holder that passes it to the party that verifies it.
+- Properties over `inspect`, the exchange's answer, the identity provider's answer and the redemption's.
+
+### Changed
+
+- `oauth.requestToken`, `oauth.token.request` and `oauth.client_auth.formRequest` take the client as optional: null sends no client, for a grant that is its own credential. Passing a client is unchanged.
+
 ## [0.2.3] - 2026-10-17
 
 ### Added

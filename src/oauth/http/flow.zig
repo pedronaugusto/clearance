@@ -1,7 +1,7 @@
 //! The flows performed: the authorization code flow with PKCE (begun as a
 //! URL for the browser, finished from the redirect), refresh, client
-//! credentials, dynamic registration, and the tokens a store keeps, kept
-//! fresh. Each takes the authorization server's metadata as discovered, so
+//! credentials, a JWT as the grant, the ID-JAG's exchange and redemption,
+//! dynamic registration, and the tokens a store keeps, kept fresh. Each takes the authorization server's metadata as discovered, so
 //! every endpoint was checked when it was read.
 const std = @import("std");
 const aegis = @import("aegis");
@@ -14,6 +14,7 @@ const authorize = @import("../authorize.zig");
 const client_auth = @import("../client_auth.zig");
 const token = @import("../token.zig");
 const registration = @import("../registration.zig");
+const id_jag = @import("../id_jag.zig");
 const store = @import("../store.zig");
 const fetch = @import("fetch.zig");
 
@@ -43,25 +44,80 @@ pub fn requestToken(
     io: std.Io,
     http: *uplink.Client,
     server: *const Server,
-    client: Client,
+    client: ?Client,
     grant: token.Grant,
     read: struct { requested_scope: ?[]const u8 = null, previous_refresh_token: ?[]const u8 = null },
     options: TokenOptions,
 ) TokenError!token.Response {
-    const endpoint = server.token_endpoint orelse return error.NoTokenEndpoint;
-    // `expires_in` counts from before the request left: the expiry is never
-    // later than the server's.
-    const now = std.Io.Clock.real.now(io);
-    var request = try token.request(gpa, io, client, grant, .{ .resources = options.resources, .extra = options.extra }, .{ .issuer = server.issuer, .now = now });
-    defer request.deinit();
-    var answer = try fetch.postForm(gpa, io, http, endpoint, &request, options.max_bytes, options.fetch);
-    defer answer.deinit();
-    return token.readResponse(gpa, answer.status, answer.body.expose(), .{
-        .now = now,
+    var sent = try send(gpa, io, http, server, client, grant, options);
+    defer sent.answer.deinit();
+    return token.readResponse(gpa, sent.answer.status, sent.answer.body.expose(), .{
+        .now = sent.at,
         .requested_scope = read.requested_scope,
         .previous_refresh_token = read.previous_refresh_token,
         .max_bytes = options.max_bytes,
     });
+}
+
+/// A grant sent to the token endpoint, its answer not yet read.
+const Sent = struct {
+    answer: fetch.SecretAnswer,
+    /// When the request left: `expires_in` counts from it, so an expiry is
+    /// never later than the server's.
+    at: std.Io.Timestamp,
+};
+
+fn send(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, server: *const Server, client: ?Client, grant: token.Grant, options: TokenOptions) (fetch.Error || client_auth.Error || error{NoTokenEndpoint})!Sent {
+    const endpoint = server.token_endpoint orelse return error.NoTokenEndpoint;
+    const now = std.Io.Clock.real.now(io);
+    var request = try token.request(gpa, io, client, grant, .{ .resources = options.resources, .extra = options.extra }, .{ .issuer = server.issuer, .now = now });
+    defer request.deinit();
+    return .{ .answer = try fetch.postForm(gpa, io, http, endpoint, &request, options.max_bytes, options.fetch), .at = now };
+}
+
+/// Tokens for a JWT presented as the grant (RFC 7523 §2.1): a workload's
+/// identity token, its platform's word for who it is (MCP's workload
+/// identity federation). `client` is null when the assertion is the only
+/// credential the server asks for. A refusal is the server's answer, never
+/// retried here: the same assertion would be refused again.
+pub fn jwtBearer(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, server: *const Server, client: ?Client, assertion: []const u8, scope: ?[]const u8, options: TokenOptions) TokenError!token.Response {
+    return requestToken(gpa, io, http, server, client, .{ .jwt_bearer = .{ .assertion = assertion, .scope = scope } }, .{ .requested_scope = scope }, options);
+}
+
+pub const IdJagError = fetch.Error || client_auth.Error || id_jag.RequestError || id_jag.ReadError || error{NoTokenEndpoint};
+
+/// An ID-JAG from the identity provider `idp` (its metadata, discovered or
+/// configured): the user's token there exchanged for an assertion to
+/// `request.audience` (RFC 8693), checked against `request`. `client` is
+/// the client as the identity provider knows it.
+pub fn requestIdJag(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, idp: *const Server, client: Client, request: id_jag.Request, options: TokenOptions) IdJagError!id_jag.Response {
+    // The provider's metadata and the request name one identity provider.
+    if (!std.mem.eql(u8, idp.issuer, request.idp_issuer)) return error.InvalidRequest;
+    const grant = try id_jag.exchangeGrant(request);
+    var exchange = options;
+    exchange.resources = &.{request.resource};
+    var sent = try send(gpa, io, http, idp, client, grant, exchange);
+    defer sent.answer.deinit();
+    return id_jag.readIssued(gpa, sent.answer.status, sent.answer.body.expose(), request, .{ .now = sent.at, .max_bytes = options.max_bytes });
+}
+
+pub const RedeemError = fetch.Error || client_auth.Error || id_jag.RedemptionError || error{
+    NoTokenEndpoint,
+    /// The ID-JAG expired before it was sent: a new one is due.
+    GrantExpired,
+};
+
+/// An access token for `grant`, redeemed at `server` (the authorization
+/// server the ID-JAG names, RFC 7523 §2.1) by `client` as that server knows
+/// it, for `resource`. Sent once: a refusal is the server's answer.
+pub fn redeemIdJag(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, server: *const Server, client: Client, grant: *const id_jag.Grant, resource: []const u8, options: TokenOptions) RedeemError!token.Response {
+    if (grant.expired(std.Io.Clock.real.now(io))) return error.GrantExpired;
+    var redemption = options;
+    // Only the assertion carries authority (`Grant.redemption`).
+    redemption.resources = &.{};
+    var sent = try send(gpa, io, http, server, client, grant.redemption(), redemption);
+    defer sent.answer.deinit();
+    return id_jag.readRedemption(gpa, sent.answer.status, sent.answer.body.expose(), grant, resource, .{ .now = sent.at, .max_bytes = options.max_bytes });
 }
 
 pub const RefreshError = TokenError || error{

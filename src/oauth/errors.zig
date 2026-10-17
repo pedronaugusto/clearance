@@ -24,6 +24,12 @@ pub const Code = enum {
     invalid_client_metadata,
     invalid_software_statement,
     unapproved_software_statement,
+    /// RFC 8707 §2: a resource the server does not serve, or will not
+    /// issue for.
+    invalid_target,
+    /// RFC 9470 §3: the user's authentication is not enough; a new sign-in
+    /// is due. An identity provider answers a token exchange with it.
+    insufficient_user_authentication,
     other,
 
     pub fn parse(name: []const u8) Code {

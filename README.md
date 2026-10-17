@@ -10,8 +10,10 @@ clearance is JWT and JOSE (JWS, JWK) and OAuth 2.1 for Zig. Two modules:
   [aegis](https://github.com/pedronaugusto/aegis) (checked types) alone.
 - `clearance.oauth`: OAuth 2.1 clients on
   [uplink](https://github.com/pedronaugusto/uplink): discovery, the
-  authorization code flow with PKCE, refresh, client credentials,
-  registration, key sets kept from a `jwks_uri`, introspection, a token store;
+  authorization code flow with PKCE, refresh, client credentials, MCP's
+  enterprise-managed authorization (an identity provider's ID-JAG redeemed
+  for an access token), a workload's JWT as the grant, registration, key sets
+  kept from a `jwks_uri`, introspection, a token store;
   a resource server's bearer check with its 401 and 403 answers; and every
   message underneath, sans I/O, for any HTTP stack.
 
@@ -108,7 +110,10 @@ defer lease.release();
 
 `oauth.AuthorizationFlow.begin` then writes the URL to open, and `finish`
 reads the redirect and exchanges the code; `oauth.fresh` keeps a store's
-tokens refreshed.
+tokens refreshed. Without a sign-in: `oauth.requestIdJag` exchanges the
+user's token at an enterprise's identity provider for an ID-JAG, and
+`oauth.redeemIdJag` redeems it with the authorization server it names;
+`oauth.jwtBearer` presents a workload's identity token as the grant.
 
 ## Design
 
@@ -141,6 +146,16 @@ tokens refreshed.
   for an unknown `kid` at most once a minute, by one task while the others
   wait, and kept through a failing key server for a grace. Keys are leased:
   a fetch never frees keys a verification holds.
+- **An ID-JAG holds to what was asked.** The identity provider's assertion
+  must name that provider, the authorization server as its sole audience,
+  the client, the resource alone and no scope beyond what was asked, and be
+  unexpired; the access token it buys must be Bearer, for that resource, with
+  no more scope than the assertion. Its signature is the authorization
+  server's to verify. A refresh token offered for it is not kept: a new
+  access token comes from the identity provider's word again.
+- **Keys may stay elsewhere.** A JWT can be signed by an external signer (a
+  KMS, an HSM) that sees only the signing input clearance built, so client
+  assertions keep their claims right whoever holds the key.
 - **Secrets in wiped memory.** Token requests (client secrets, verifiers,
   refresh tokens) and token sets live in aegis secret memory; `state` and
   `nonce` compare in constant time.
@@ -157,18 +172,23 @@ authorization code flow with PKCE, refresh, client credentials, RFC 7591
 registration, remote key sets, cached introspection, a token store kept fresh,
 the Bearer challenge read for a step-up, the resource server's bearer check
 (a key set or introspection, the audience and scopes, RFC 6750 and RFC 9728
-answers). Their messages: RFC 8414 and OpenID Connect Discovery metadata, RFC 9728 protected
+answers), the Identity Assertion JWT Authorization Grant
+(draft-ietf-oauth-identity-assertion-authz-grant-04) as MCP's
+enterprise-managed authorization uses it, and the JWT-bearer grant (RFC 7523)
+for a workload's identity token. Their messages: RFC 8414 and OpenID Connect Discovery metadata, RFC 9728 protected
 resource metadata, PKCE (S256), the authorization request with RFC 8707
 resources and its callback with RFC 9207's `iss`, the authorization code,
-refresh and client credentials grants, client authentication (none,
-`client_secret_basic`, `client_secret_post`, `private_key_jwt`), RFC 7591
+refresh, client credentials, token exchange (RFC 8693) and JWT-bearer
+grants, client authentication (none, `client_secret_basic`,
+`client_secret_post`, `private_key_jwt` with the key in memory or an external
+signer, `client_secret_jwt`), RFC 7591
 registration, client ID metadata documents, RFC 7662 introspection, RFC 6750
 challenges with `resource_metadata`.
 
 Not built: JWE; ES512, ES256K and Ed448; the JWS JSON serialization; unencoded
 payloads (RFC 7797); an authorization server; device authorization, token
-revocation, token exchange, the JWT-bearer grant, DPoP, PAR and
-`client_secret_jwt`, until a user needs one.
+revocation, DPoP, PAR and rich authorization requests (RFC 9396), until a
+user needs one.
 
 ## Built with
 
@@ -185,10 +205,10 @@ properties; [preflight](https://github.com/pedronaugusto/preflight) gates it.
 `bay test` runs the suite: the examples of RFC 7520 (the JOSE cookbook), 7638
 and 8037, Wycheproof's `json_web_signature`, `json_web_key` and
 `json_web_crypto` files, and properties over every parser of untrusted input
-(tokens, key sets, claims, metadata, token, registration and introspection
-responses, callbacks, challenges), which `bay properties --fuzz` runs under Zig's
-fuzzer; and the flows end to end against an authorization server on uplink's
-server in the same process.
+(tokens, read verified or not, key sets, claims, metadata, token, exchange,
+ID-JAG, registration and introspection responses, callbacks, challenges), which `bay properties --fuzz` runs under Zig's
+fuzzer; and the flows end to end against an authorization server and an
+identity provider on uplink's server in the same process.
 
 ## Licence
 

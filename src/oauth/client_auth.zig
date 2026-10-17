@@ -1,6 +1,7 @@
 //! How a client proves itself to the token and introspection endpoints
 //! (RFC 6749 §2.3, OAuth 2.1 §2.4; RFC 7523 §2.2 and RFC 7521 §4.2 for
-//! `private_key_jwt`), and the form request that carries it. A request holds
+//! `private_key_jwt` and `client_secret_jwt`), and the form request that
+//! carries it. A request holds
 //! secrets (a client secret, a refresh token, a code verifier), so its body
 //! and its `Authorization` value live in wiped memory.
 const std = @import("std");
@@ -17,6 +18,7 @@ pub const Method = enum {
     client_secret_basic,
     client_secret_post,
     private_key_jwt,
+    client_secret_jwt,
 
     pub fn name(m: Method) []const u8 {
         return @tagName(m);
@@ -35,8 +37,12 @@ pub const Credentials = union(Method) {
     client_secret_basic: []const u8,
     /// The secret, sent in the body.
     client_secret_post: []const u8,
-    /// A JWT the client signs, its audience the issuer.
+    /// A JWT the client signs with its private key (in memory, or kept by
+    /// an external signer), its audience the issuer.
     private_key_jwt: PrivateKeyJwt,
+    /// A JWT the client signs with HS256 under its secret, its audience the
+    /// issuer: a server that asks for it rather than the secret itself.
+    client_secret_jwt: []const u8,
 };
 
 pub const PrivateKeyJwt = struct {
@@ -97,7 +103,9 @@ pub const Error = error{
 
 /// The form request of `pairs` from `client`: its credentials added as its
 /// method says. `io` draws an assertion's `jti` and its signature's noise.
-pub fn formRequest(gpa: std.mem.Allocator, io: std.Io, client: Client, pairs: []const form.Pair, context: Context) Error!FormRequest {
+/// A null `client` adds nothing: a request whose grant is its own
+/// credential.
+pub fn formRequest(gpa: std.mem.Allocator, io: std.Io, maybe_client: ?Client, pairs: []const form.Pair, context: Context) Error!FormRequest {
     var all: std.ArrayList(form.Pair) = .empty;
     defer all.deinit(gpa);
     try all.appendSlice(gpa, pairs);
@@ -105,22 +113,23 @@ pub fn formRequest(gpa: std.mem.Allocator, io: std.Io, client: Client, pairs: []
     defer assertion.deinit();
     var authorization: ?aegis.SecretBytes = null;
     errdefer if (authorization) |*a| a.deinit();
-    switch (client.credentials) {
+    if (maybe_client) |client| switch (client.credentials) {
         .none => try all.append(gpa, .{ .name = "client_id", .value = client.id }),
         .client_secret_post => |secret| try all.appendSlice(gpa, &.{
             .{ .name = "client_id", .value = client.id },
             .{ .name = "client_secret", .value = secret },
         }),
         .client_secret_basic => |secret| authorization = try basic(gpa, client.id, secret),
-        .private_key_jwt => |p| {
-            try signAssertion(gpa, io, &assertion.writer, client.id, p, context);
+        inline .private_key_jwt, .client_secret_jwt => |p, method| {
+            const key: PrivateKeyJwt = if (method == .private_key_jwt) p else .{ .signer = .{ .hmac = .{ .alg = .hs256, .secret = p } } };
+            try signAssertion(gpa, io, &assertion.writer, client.id, key, context);
             try all.appendSlice(gpa, &.{
                 .{ .name = "client_id", .value = client.id },
                 .{ .name = "client_assertion_type", .value = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer" },
                 .{ .name = "client_assertion", .value = assertion.written() },
             });
         },
-    }
+    };
     var body = try encodeSecret(gpa, all.items);
     errdefer body.deinit();
     return .{ .body = body, .authorization = authorization };
@@ -238,4 +247,26 @@ test "private_key_jwt signs an assertion of the client, for the issuer, briefly"
     }, now, &scratch);
     try std.testing.expectEqual(@as(?i64, 1_800_000_060), verified.registered.exp);
     try std.testing.expectEqual(@as(usize, pkce.length), verified.registered.jti.?.len);
+}
+
+test "client_secret_jwt signs the assertion with HS256 under the secret" {
+    const gpa = std.testing.allocator;
+    const secret = "a secret of at least thirty-two bytes!";
+    const now: std.Io.Timestamp = .{ .nanoseconds = 1_800_000_000 * std.time.ns_per_s };
+    var request = try formRequest(gpa, std.testing.io, .{ .id = "c", .credentials = .{ .client_secret_jwt = secret } }, &.{}, .{ .issuer = "https://as.example", .now = now });
+    defer request.deinit();
+    const body = request.body.expose();
+    try std.testing.expectEqual(@as(?aegis.SecretBytes, null), request.authorization);
+    const assertion = body[std.mem.find(u8, body, "client_assertion=").? + "client_assertion=".len ..];
+    var scratch: [2048]u8 = undefined;
+    const verified = try jwt.verify(void, assertion, &.{clearance.Key.hmac(secret)}, .{
+        .algorithms = &.{.hs256},
+        .issuer = "c",
+        .subject = "c",
+        .audience = "https://as.example",
+        .required = .{ .jti = true, .iat = true },
+    }, now, &scratch);
+    try std.testing.expectEqual(clearance.Algorithm.hs256, verified.header.alg);
+    // A secret shorter than the hash is no HS256 key (RFC 7518 §3.2).
+    try std.testing.expectError(error.InvalidKey, formRequest(gpa, std.testing.io, .{ .id = "c", .credentials = .{ .client_secret_jwt = "short" } }, &.{}, .{ .issuer = "https://as.example", .now = now }));
 }

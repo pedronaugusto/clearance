@@ -7,6 +7,8 @@ const strand = @import("strand");
 const form = @import("uplink.wire").form;
 const client_auth = @import("client_auth.zig");
 const errors = @import("errors.zig");
+const exchange = @import("exchange.zig");
+const Scratch = @import("scratch.zig").Scratch;
 
 /// What the client asks a token for.
 pub const Grant = union(enum) {
@@ -28,7 +30,32 @@ pub const Grant = union(enum) {
     client_credentials: struct {
         scope: ?[]const u8 = null,
     },
+    /// One token for another (RFC 8693 §2.1): an identity provider's for an
+    /// ID-JAG, in MCP's enterprise-managed authorization.
+    token_exchange: exchange.Request,
+    /// A JWT as the grant (RFC 7523 §2.1): an ID-JAG redeemed at the
+    /// authorization server it names, or a workload's identity token.
+    jwt_bearer: struct {
+        assertion: []const u8,
+        /// Space-separated. Null: what the assertion carries, or the
+        /// server's default.
+        scope: ?[]const u8 = null,
+    },
+
+    /// The grant type it is sent as.
+    pub fn typeName(g: Grant) []const u8 {
+        return switch (g) {
+            .authorization_code => "authorization_code",
+            .refresh_token => "refresh_token",
+            .client_credentials => "client_credentials",
+            .token_exchange => exchange.grant_type,
+            .jwt_bearer => jwt_bearer_grant_type,
+        };
+    }
 };
+
+/// The grant type of a JWT used as an authorization grant (RFC 7523 §2.1).
+pub const jwt_bearer_grant_type = "urn:ietf:params:oauth:grant-type:jwt-bearer";
 
 pub const RequestOptions = struct {
     /// RFC 8707's `resource`, once each.
@@ -37,26 +64,35 @@ pub const RequestOptions = struct {
     extra: []const form.Pair = &.{},
 };
 
-/// The token request for `grant`, authenticated as `client` says.
-pub fn request(gpa: std.mem.Allocator, io: std.Io, client: client_auth.Client, grant: Grant, options: RequestOptions, context: client_auth.Context) client_auth.Error!client_auth.FormRequest {
+/// The token request for `grant`, authenticated as `client` says; null
+/// sends no client at all (a JWT-bearer grant whose assertion is the only
+/// credential, RFC 7521 §4.1).
+pub fn request(gpa: std.mem.Allocator, io: std.Io, client: ?client_auth.Client, grant: Grant, options: RequestOptions, context: client_auth.Context) client_auth.Error!client_auth.FormRequest {
     var pairs: std.ArrayList(form.Pair) = .empty;
     defer pairs.deinit(gpa);
+    try pairs.append(gpa, .{ .name = "grant_type", .value = grant.typeName() });
     switch (grant) {
         .authorization_code => |g| try pairs.appendSlice(gpa, &.{
-            .{ .name = "grant_type", .value = "authorization_code" },
             .{ .name = "code", .value = g.code },
             .{ .name = "redirect_uri", .value = g.redirect_uri },
             .{ .name = "code_verifier", .value = g.code_verifier },
         }),
         .refresh_token => |g| {
-            try pairs.appendSlice(gpa, &.{
-                .{ .name = "grant_type", .value = "refresh_token" },
-                .{ .name = "refresh_token", .value = g.refresh_token },
-            });
+            try pairs.append(gpa, .{ .name = "refresh_token", .value = g.refresh_token });
             if (g.scope) |scope| try pairs.append(gpa, .{ .name = "scope", .value = scope });
         },
-        .client_credentials => |g| {
-            try pairs.append(gpa, .{ .name = "grant_type", .value = "client_credentials" });
+        .client_credentials => |g| if (g.scope) |scope| try pairs.append(gpa, .{ .name = "scope", .value = scope }),
+        .token_exchange => |g| {
+            if (g.requested_token_type) |t| try pairs.append(gpa, .{ .name = "requested_token_type", .value = t });
+            try pairs.appendSlice(gpa, &.{
+                .{ .name = "subject_token", .value = g.subject_token },
+                .{ .name = "subject_token_type", .value = g.subject_token_type },
+            });
+            if (g.audience) |a| try pairs.append(gpa, .{ .name = "audience", .value = a });
+            if (g.scope) |scope| try pairs.append(gpa, .{ .name = "scope", .value = scope });
+        },
+        .jwt_bearer => |g| {
+            try pairs.append(gpa, .{ .name = "assertion", .value = g.assertion });
             if (g.scope) |scope| try pairs.append(gpa, .{ .name = "scope", .value = scope });
         },
     }
@@ -266,78 +302,6 @@ pub fn readResponse(gpa: std.mem.Allocator, status: u16, body: []const u8, optio
     }) };
 }
 
-/// What reading `length` bytes of JSON that may hold secrets can take: its
-/// unescaped strings and the parser's own bookkeeping.
-fn scratchLength(length: usize) usize {
-    return length * 2 + 4096;
-}
-
-/// Where a response is parsed: on the stack when it is small (a token
-/// response usually is), on the heap in wiped memory when it is not. Only
-/// what the parser wrote is wiped from the stack: strings it unescaped, so a
-/// response without escapes costs no allocation and no wipe.
-const Scratch = struct {
-    stack: [scratchLength(2048)]u8,
-    heap: ?aegis.SecretBytes,
-    fixed: std.heap.FixedBufferAllocator,
-    /// The furthest the parser has written: a shrink or a free moves the
-    /// fixed allocator's end back, never this.
-    high: usize,
-
-    /// Sets up `s` in place, its stack left as it is: a struct literal
-    /// would fill the whole buffer with zeros first, more work than the
-    /// parse itself.
-    fn init(s: *Scratch, gpa: std.mem.Allocator, length: usize) std.mem.Allocator.Error!void {
-        s.heap = null;
-        s.high = 0;
-        const capacity = scratchLength(length);
-        if (capacity <= s.stack.len) {
-            s.fixed = .init(s.stack[0..capacity]);
-            return;
-        }
-        s.heap = aegis.SecretBytes.init(gpa, capacity) catch return error.OutOfMemory;
-        // unreachable: the capacity was just allocated at this length
-        s.heap.?.resizeWithinCapacity(capacity) catch unreachable;
-        s.fixed = .init(s.heap.?.exposeMut());
-    }
-
-    fn deinit(s: *Scratch) void {
-        if (s.heap) |*h| return h.deinit();
-        std.crypto.secureZero(u8, s.stack[0..s.high]);
-    }
-
-    fn allocator(s: *Scratch) std.mem.Allocator {
-        return .{ .ptr = s, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
-    }
-
-    fn mark(s: *Scratch) void {
-        s.high = @max(s.high, s.fixed.end_index);
-    }
-
-    fn alloc(opaque_self: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-        const s: *Scratch = @ptrCast(@alignCast(opaque_self)); // safe: the vtable is only ever handed out with a *Scratch
-        defer s.mark();
-        return s.fixed.allocator().rawAlloc(len, alignment, ret);
-    }
-
-    fn resize(opaque_self: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
-        const s: *Scratch = @ptrCast(@alignCast(opaque_self)); // safe: the vtable is only ever handed out with a *Scratch
-        defer s.mark();
-        return s.fixed.allocator().rawResize(memory, alignment, new_len, ret);
-    }
-
-    fn remap(opaque_self: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
-        const s: *Scratch = @ptrCast(@alignCast(opaque_self)); // safe: the vtable is only ever handed out with a *Scratch
-        defer s.mark();
-        return s.fixed.allocator().rawRemap(memory, alignment, new_len, ret);
-    }
-
-    fn free(opaque_self: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
-        const s: *Scratch = @ptrCast(@alignCast(opaque_self)); // safe: the vtable is only ever handed out with a *Scratch
-        s.fixed.allocator().rawFree(memory, alignment, ret);
-    }
-};
-
 const testing = std.testing;
 const ctx: client_auth.Context = .{ .issuer = "https://as.example", .now = .{ .nanoseconds = 0 } };
 
@@ -351,6 +315,19 @@ test "each grant's request" {
     var credentials = try request(testing.allocator, testing.io, .{ .id = "c", .credentials = .{ .client_secret_post = "s" } }, .{ .client_credentials = .{} }, .{}, ctx);
     defer credentials.deinit();
     try testing.expectEqualStrings("grant_type=client_credentials&client_id=c&client_secret=s", credentials.body.expose());
+    var exchanged = try request(testing.allocator, testing.io, .{ .id = "idp-app" }, .{ .token_exchange = .{
+        .subject_token = "eyJ.id.tok",
+        .subject_token_type = exchange.token_type.id_token,
+        .requested_token_type = exchange.token_type.id_jag,
+        .audience = "https://as.example",
+        .scope = "files:read",
+    } }, .{ .resources = &.{"https://rs.example/mcp"} }, ctx);
+    defer exchanged.deinit();
+    try testing.expectEqualStrings("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aid-jag&subject_token=eyJ.id.tok&subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aid_token&audience=https%3A%2F%2Fas.example&scope=files%3Aread&resource=https%3A%2F%2Frs.example%2Fmcp&client_id=idp-app", exchanged.body.expose());
+    var bearer = try request(testing.allocator, testing.io, null, .{ .jwt_bearer = .{ .assertion = "eyJ.w.s" } }, .{}, ctx);
+    defer bearer.deinit();
+    try testing.expectEqualStrings("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJ.w.s", bearer.body.expose());
+    try testing.expectEqual(@as(?aegis.SecretBytes, null), bearer.authorization);
 }
 
 test "a token response is read into a set: expiry from now, Bearer in any case, scope and refresh token carried" {

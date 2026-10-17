@@ -85,6 +85,7 @@ const Provider = struct {
         }
         if (std.mem.eql(u8, path, "/authorize")) return p.authorize(io, arena, request, response);
         if (std.mem.eql(u8, path, "/token")) return p.token(io, arena, request, response);
+        if (std.mem.eql(u8, path, "/idp/token")) return p.identityProvider(io, arena, request, response);
         if (std.mem.eql(u8, path, "/register")) {
             if (!std.mem.eql(u8, request.headers.get("authorization") orelse "", "Bearer initial")) {
                 response.status = .unauthorized;
@@ -180,6 +181,7 @@ const Provider = struct {
             p.refresh_token = "rt2";
             return response.send(io, "{\"access_token\":\"at2\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"refresh_token\":\"rt2\"}");
         }
+        if (std.mem.eql(u8, grant, "urn:ietf:params:oauth:grant-type:jwt-bearer")) return p.jwtBearer(io, arena, request, body, response);
         if (std.mem.eql(u8, grant, "client_credentials")) {
             // RFC 6749 §4.4.2's client, `s6BhdRkqt3:7Fjfp0ZBr1KtDRbnfVdmIw`.
             if (!std.mem.eql(u8, request.headers.get("authorization") orelse "", "Basic czZCaGRSa3F0Mzo3RmpmcDBaQnIxS3REUmJuZlZkbUl3")) {
@@ -189,6 +191,81 @@ const Provider = struct {
             return response.send(io, "{\"access_token\":\"cc\",\"token_type\":\"bearer\",\"expires_in\":60,\"scope\":\"read\"}");
         }
         return refuse(io, response, "unsupported_grant_type");
+    }
+
+    /// An enterprise's identity provider: an ID token of the user `u1`
+    /// (here the text `id-token-u1`) exchanged for an ID-JAG to the audience
+    /// asked, for the client `mcp-client`, the resource asked and the scope
+    /// asked less `admin`. The subject `id-token-other-client` gets one
+    /// naming another client.
+    fn identityProvider(p: *Provider, io: Io, arena: std.mem.Allocator, request: *uplink.server.Request, response: *uplink.server.Response) !void {
+        const body = try request.collect(arena, io, .limited(8192));
+        p.mutex.lockUncancelable(io);
+        p.token_requests += 1;
+        p.mutex.unlock(io);
+        const ok = std.mem.eql(u8, field(arena, body, "grant_type") orelse "", "urn:ietf:params:oauth:grant-type:token-exchange") and
+            std.mem.eql(u8, field(arena, body, "requested_token_type") orelse "", "urn:ietf:params:oauth:token-type:id-jag") and
+            std.mem.eql(u8, field(arena, body, "subject_token_type") orelse "", "urn:ietf:params:oauth:token-type:id_token") and
+            std.mem.eql(u8, field(arena, body, "client_id") orelse "", "idp-app");
+        if (!ok) return refuse(io, response, "invalid_request");
+        const subject = field(arena, body, "subject_token") orelse "";
+        const client_id = if (std.mem.eql(u8, subject, "id-token-u1")) "mcp-client" else if (std.mem.eql(u8, subject, "id-token-other-client")) "someone-else" else return refuse(io, response, "invalid_grant");
+        var scope: std.Io.Writer.Allocating = .init(arena);
+        var it = std.mem.tokenizeScalar(u8, field(arena, body, "scope") orelse "", ' ');
+        while (it.next()) |s| if (!std.mem.eql(u8, s, "admin")) {
+            if (scope.written().len != 0) try scope.writer.writeByte(' ');
+            try scope.writer.writeAll(s);
+        };
+        const now: i64 = @intCast(@divFloor(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
+        var jag: std.Io.Writer.Allocating = .init(arena);
+        try signTyped(arena, io, &jag.writer, "k1", "oauth-id-jag+jwt", .{
+            .iss = try std.mem.concat(arena, u8, &.{ p.base, "/idp" }),
+            .sub = "u1",
+            .aud = field(arena, body, "audience") orelse "",
+            .client_id = client_id,
+            .jti = "jag-1",
+            .iat = now,
+            .exp = now + 300,
+            .resource = field(arena, body, "resource") orelse "",
+            .scope = if (scope.written().len == 0) null else scope.written(),
+        });
+        return response.send(io, try arena.print("{{\"access_token\":\"{s}\",\"issued_token_type\":\"urn:ietf:params:oauth:token-type:id-jag\",\"token_type\":\"N_A\",\"expires_in\":300}}", .{jag.written()}));
+    }
+
+    /// A JWT as the grant: an ID-JAG from the identity provider, for this
+    /// server and the client that authenticates (`mcp-client`, Basic with
+    /// `pw`), or a workload's token for this server with no client. Each
+    /// is verified with the provider's key.
+    fn jwtBearer(p: *Provider, io: Io, arena: std.mem.Allocator, request: *uplink.server.Request, body: []const u8, response: *uplink.server.Response) !void {
+        const assertion = field(arena, body, "assertion") orelse return refuse(io, response, "invalid_request");
+        var keys = try clearance.jwk.KeySet.parse(arena, "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"kid\":\"k1\",\"x\":\"" ++ ed25519_x ++ "\"}", .{});
+        defer keys.deinit();
+        const scratch = try arena.alloc(u8, clearance.jws.scratchLength(assertion.len));
+        const now = Io.Clock.real.now(io);
+        if (request.headers.get("authorization")) |authorization| {
+            // mcp-client:pw
+            if (!std.mem.eql(u8, authorization, "Basic bWNwLWNsaWVudDpwdw==")) {
+                response.status = .unauthorized;
+                return response.send(io, "{\"error\":\"invalid_client\"}");
+            }
+            const Jag = struct { client_id: []const u8, resource: []const u8, scope: ?[]const u8 = null };
+            const verified = clearance.jwt.verify(Jag, assertion, keys.keys, .{
+                .algorithms = &.{.eddsa},
+                .issuer = try std.mem.concat(arena, u8, &.{ p.base, "/idp" }),
+                .audience = p.base,
+                .typ = "oauth-id-jag+jwt",
+                .required = .{ .sub = true, .jti = true, .iat = true },
+            }, now, scratch) catch return refuse(io, response, "invalid_grant");
+            if (!std.mem.eql(u8, verified.claims.client_id, "mcp-client")) return refuse(io, response, "invalid_grant");
+            // Asking for a scope or naming a resource again is not the
+            // redemption's: the assertion carries both.
+            if (field(arena, body, "scope") != null or field(arena, body, "resource") != null) return refuse(io, response, "invalid_request");
+            return response.send(io, try arena.print("{{\"access_token\":\"ema-at\",\"token_type\":\"Bearer\",\"expires_in\":600,\"refresh_token\":\"not-wanted\",\"resource\":\"{s}\"}}", .{verified.claims.resource}));
+        }
+        _ = clearance.jwt.verify(void, assertion, keys.keys, .{ .algorithms = &.{.eddsa}, .audience = p.base }, now, scratch) catch return refuse(io, response, "invalid_grant");
+        const scope = field(arena, body, "scope") orelse "";
+        if (oauth.challenge.contains(scope, "wif.rejected")) return refuse(io, response, "invalid_scope");
+        return response.send(io, "{\"access_token\":\"wif-at\",\"token_type\":\"Bearer\",\"expires_in\":600}");
     }
 
     fn refuse(io: Io, response: *uplink.server.Response, code: []const u8) !void {
@@ -409,12 +486,16 @@ fn signToken(gpa: std.mem.Allocator, io: Io, out: *std.Io.Writer, kid: []const u
 }
 
 fn signClaims(gpa: std.mem.Allocator, io: Io, out: *std.Io.Writer, kid: []const u8, claims: anytype) !void {
+    return signTyped(gpa, io, out, kid, "at+jwt", claims);
+}
+
+fn signTyped(gpa: std.mem.Allocator, io: Io, out: *std.Io.Writer, kid: []const u8, typ: []const u8, claims: anytype) !void {
     var der: [48]u8 = undefined;
     _ = try std.fmt.hexToBytes(der[0..16], ed25519_der_prefix);
     _ = try std.base64.url_safe_no_pad.Decoder.decode(der[16..48], ed25519_d);
     const key = try cloak.PrivateKey.parse(gpa, &der, .{});
     defer key.deinit();
-    try clearance.jwt.sign(gpa, io, out, .{ .kid = kid, .typ = "at+jwt" }, claims, .{ .private = .{ .alg = .eddsa, .key = key } });
+    try clearance.jwt.sign(gpa, io, out, .{ .kid = kid, .typ = typ }, claims, .{ .private = .{ .alg = .eddsa, .key = key } });
 }
 
 test "a remote key set is fetched once, kept as its answer says, and fetched again for a new kid" {
@@ -646,4 +727,113 @@ test "an ID token from the code flow: the flow's nonce and the access token's ha
     var other = try oauth.TokenSet.init(testing.allocator, .{ .access_token = "other", .id_token = id.written() });
     defer other.deinit();
     try testing.expectError(error.WrongAccessTokenHash, flow.verifyIdToken(void, &other, &server, "app", keys.keys, &.{.eddsa}, Io.Clock.real.now(io), &scratch));
+}
+
+test "enterprise-managed authorization: the user's ID token exchanged for an ID-JAG, redeemed for an access token" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var p: Provider = undefined;
+    try p.start(io);
+    defer p.stop(io);
+    var http: uplink.Client = .init(gpa, .{});
+    defer http.deinit(io);
+    var as = try oauth.discover(gpa, io, &http, p.base, .{});
+    defer as.deinit();
+    var buffer: [128]u8 = undefined;
+    var idp_issuer: [128]u8 = undefined;
+    const idp: oauth.metadata.AuthorizationServer = .{ .issuer = p.url(&idp_issuer, "/idp"), .token_endpoint = p.url(&buffer, "/idp/token") };
+    const request: oauth.id_jag.Request = .{
+        .idp_issuer = idp.issuer,
+        .subject_token = "id-token-u1",
+        .audience = as.value.issuer,
+        .client_id = "mcp-client",
+        .resource = "https://rs.example/mcp",
+        .scope = "files:read admin",
+    };
+    var issued = try oauth.requestIdJag(gpa, io, &http, &idp, .{ .id = "idp-app" }, request, .{});
+    var grant = &issued.granted;
+    defer grant.deinit();
+    // The provider narrowed the scope: what the ID-JAG carries is what the
+    // access token is held to.
+    try testing.expectEqualStrings("files:read", grant.scope.?);
+
+    const client: oauth.Client = .{ .id = "mcp-client", .credentials = .{ .client_secret_basic = "pw" } };
+    var redeemed = try oauth.redeemIdJag(gpa, io, &http, &as.value, client, grant, request.resource, .{});
+    var set = &redeemed.tokens;
+    defer set.deinit();
+    try testing.expectEqualStrings("ema-at", set.access_token);
+    try testing.expectEqualStrings("files:read", set.scope.?);
+    // The server gave a refresh token anyway; it is not kept.
+    try testing.expectEqual(@as(?[]const u8, null), set.refresh_token);
+
+    // The wrong secret: the server's answer, as a value.
+    const refused = try oauth.redeemIdJag(gpa, io, &http, &as.value, .{ .id = "mcp-client", .credentials = .{ .client_secret_basic = "wrong" } }, grant, request.resource, .{});
+    try testing.expectEqual(oauth.errors.Code.invalid_client, refused.refused.code);
+    // An expired ID-JAG is not sent.
+    const before = blk: {
+        p.mutex.lockUncancelable(io);
+        defer p.mutex.unlock(io);
+        break :blk p.token_requests;
+    };
+    grant.expires_at = 0;
+    try testing.expectError(error.GrantExpired, oauth.redeemIdJag(gpa, io, &http, &as.value, client, grant, request.resource, .{}));
+    p.mutex.lockUncancelable(io);
+    defer p.mutex.unlock(io);
+    try testing.expectEqual(before, p.token_requests);
+}
+
+test "an identity provider's refusal is its answer; an ID-JAG for another client is refused" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var p: Provider = undefined;
+    try p.start(io);
+    defer p.stop(io);
+    var http: uplink.Client = .init(gpa, .{});
+    defer http.deinit(io);
+    var buffer: [128]u8 = undefined;
+    var idp_issuer: [128]u8 = undefined;
+    const idp: oauth.metadata.AuthorizationServer = .{ .issuer = p.url(&idp_issuer, "/idp"), .token_endpoint = p.url(&buffer, "/idp/token") };
+    var request: oauth.id_jag.Request = .{
+        .idp_issuer = idp.issuer,
+        .subject_token = "stale",
+        .audience = p.base,
+        .client_id = "mcp-client",
+        .resource = "https://rs.example/mcp",
+    };
+    const refused = try oauth.requestIdJag(gpa, io, &http, &idp, .{ .id = "idp-app" }, request, .{});
+    try testing.expectEqual(oauth.errors.Code.invalid_grant, refused.refused.code);
+    request.subject_token = "id-token-other-client";
+    try testing.expectError(error.WrongClient, oauth.requestIdJag(gpa, io, &http, &idp, .{ .id = "idp-app" }, request, .{}));
+    // Metadata of one provider and a request naming another.
+    request.idp_issuer = "https://elsewhere.example";
+    try testing.expectError(error.InvalidRequest, oauth.requestIdJag(gpa, io, &http, &idp, .{ .id = "idp-app" }, request, .{}));
+}
+
+test "a workload's JWT as the grant, with no client; a refusal is the server's answer, not retried" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var p: Provider = undefined;
+    try p.start(io);
+    defer p.stop(io);
+    var http: uplink.Client = .init(gpa, .{});
+    defer http.deinit(io);
+    var as = try oauth.discover(gpa, io, &http, p.base, .{});
+    defer as.deinit();
+    const now: i64 = @intCast(@divFloor(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
+    var workload: std.Io.Writer.Allocating = .init(gpa);
+    defer workload.deinit();
+    try signTyped(gpa, io, &workload.writer, "k1", "JWT", .{ .iss = "https://platform.example", .sub = "system:serviceaccount:ns:agent", .aud = p.base, .exp = now + 300 });
+    var ok = try oauth.jwtBearer(gpa, io, &http, &as.value, null, workload.written(), null, .{});
+    defer ok.tokens.deinit();
+    try testing.expectEqualStrings("wif-at", ok.tokens.access_token);
+    const before = blk: {
+        p.mutex.lockUncancelable(io);
+        defer p.mutex.unlock(io);
+        break :blk p.token_requests;
+    };
+    const rejected = try oauth.jwtBearer(gpa, io, &http, &as.value, null, workload.written(), "wif.rejected", .{});
+    try testing.expectEqual(oauth.errors.Code.invalid_scope, rejected.refused.code);
+    p.mutex.lockUncancelable(io);
+    defer p.mutex.unlock(io);
+    try testing.expectEqual(before + 1, p.token_requests);
 }

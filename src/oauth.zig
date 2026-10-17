@@ -26,6 +26,11 @@ pub const authorize = @import("oauth/authorize.zig");
 pub const client_auth = @import("oauth/client_auth.zig");
 /// The token endpoint: grants asked, `TokenSet`s read.
 pub const token = @import("oauth/token.zig");
+/// Token exchange (RFC 8693): what it carries, its answer read.
+pub const exchange = @import("oauth/exchange.zig");
+/// The Identity Assertion JWT Authorization Grant: MCP's
+/// enterprise-managed authorization, the client's side.
+pub const id_jag = @import("oauth/id_jag.zig");
 /// Dynamic client registration (RFC 7591) and client ID metadata documents.
 pub const registration = @import("oauth/registration.zig");
 /// Token introspection (RFC 7662).
@@ -61,6 +66,12 @@ pub const requestToken = http_flow.requestToken;
 pub const refresh = http_flow.refresh;
 /// Tokens for the client itself.
 pub const clientCredentials = http_flow.clientCredentials;
+/// Tokens for a JWT presented as the grant: a workload's identity token.
+pub const jwtBearer = http_flow.jwtBearer;
+/// An ID-JAG from an identity provider, for the user's token there.
+pub const requestIdJag = http_flow.requestIdJag;
+/// An access token for an ID-JAG, from the authorization server it names.
+pub const redeemIdJag = http_flow.redeemIdJag;
 /// Dynamic client registration (RFC 7591).
 pub const register = http_flow.register;
 /// The tokens a store keeps, refreshed first when they are about to expire.
@@ -68,6 +79,8 @@ pub const fresh = http_flow.fresh;
 pub const TokenOptions = http_flow.TokenOptions;
 pub const TokenError = http_flow.TokenError;
 pub const RefreshError = http_flow.RefreshError;
+pub const IdJagError = http_flow.IdJagError;
+pub const RedeemError = http_flow.RedeemError;
 pub const RegisterOptions = http_flow.RegisterOptions;
 pub const RegisterError = http_flow.RegisterError;
 pub const FreshOptions = http_flow.FreshOptions;
@@ -103,6 +116,8 @@ test {
     _ = authorize;
     _ = client_auth;
     _ = token;
+    _ = exchange;
+    _ = id_jag;
     _ = registration;
     _ = introspection;
     _ = challenge;
