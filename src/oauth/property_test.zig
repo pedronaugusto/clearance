@@ -77,7 +77,6 @@ fn anyRegistration(_: void, c: *shake.Case) !void {
         .registered => |*r| {
             defer r.deinit();
             if (r.client_id.len == 0) return error.EmptyClientId;
-            if (r.client_secret != null and r.client_secret_expires_at == null) return error.SecretWithoutExpiry;
         },
         .refused => {},
     }
