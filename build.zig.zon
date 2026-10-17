@@ -24,8 +24,8 @@
             .hash = "strand-0.11.1-8LNWVtZJJgDujColV9BwoK1duuRMWp4bfuV2Gc2iLTEI",
         },
         .cloak = .{
-            .url = "git+https://github.com/pedronaugusto/cloak?ref=ecdsa-p1363#d490f735b298f5a70fcb85c1e71807cc15c28008",
-            .hash = "cloak-0.12.0-9onwcd4HsgOsQHX6cy1UBnuN5EdQu0tkjiYh6IGTV9Wt",
+            .url = "git+https://github.com/pedronaugusto/cloak?ref=v0.14.0#96937bd116c5b782d05c892b065185946ca5af44",
+            .hash = "cloak-0.14.0-9onwcU2TsgMEExxAm1t0a5U6haDzjUmG1SNikYrqPPoc",
         },
     },
     .dev_dependencies = .{

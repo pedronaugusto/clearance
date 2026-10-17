@@ -119,8 +119,8 @@ properties; [preflight](https://github.com/pedronaugusto/preflight) gates it.
 
 ## Testing
 
-`bay test` runs the suite: the examples of RFC 7515, 7520 (the JOSE cookbook),
-7638 and 8037, Wycheproof's `json_web_signature`, `json_web_key` and
+`bay test` runs the suite: the examples of RFC 7520 (the JOSE cookbook), 7638
+and 8037, Wycheproof's `json_web_signature`, `json_web_key` and
 `json_web_crypto` files, and properties over every parser of untrusted input
 (tokens, key sets, claims), which `bay properties --fuzz` runs under Zig's
 fuzzer.
