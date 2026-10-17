@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `oauth.bearer.Verifier` answers a token its authorization server will not introspect (`unsupported_token_type`, which oidc-provider gives for the JWT access tokens it issues) with 401 `invalid_token`, the client's to fix, instead of failing with `error.Unavailable` (a 503), which is kept for a server refusing the resource server's credentials or failing. Found running the flows against oidc-provider.
 - `oauth.token.readResponse` and `TokenSet.read` no longer zero their 8 KiB stack scratch before each parse: it was set up from a struct literal, which fills the whole buffer first, and that fill was half the time of reading a 1 KiB response on Linux. The scratch is now set up in place (389 to 217 ns per response on the Lima VM, 325 to 224 ns on an M3, best of 7). `errors.Text.init` the same way.
 
 ## [0.2.1] - 2026-10-17

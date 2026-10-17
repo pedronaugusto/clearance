@@ -110,7 +110,12 @@ const Provider = struct {
             p.introspections += 1;
             p.mutex.unlock(io);
             const now = @divFloor(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s);
-            const active = std.mem.eql(u8, field(arena, body, "token") orelse "", "good");
+            const presented = field(arena, body, "token") orelse "";
+            if (std.mem.eql(u8, presented, "eyJ.structured.jwt")) {
+                response.status = .bad_request;
+                return response.send(io, "{\"error\":\"unsupported_token_type\",\"error_description\":\"Structured JWT Tokens cannot be introspected\"}");
+            }
+            const active = std.mem.eql(u8, presented, "good");
             if (!active) return response.send(io, "{\"active\":false}");
             return response.send(io, try arena.print("{{\"active\":true,\"scope\":\"mcp\",\"aud\":\"{s}\",\"exp\":{d}}}", .{ p.base, now + 3600 }));
         }
@@ -603,6 +608,11 @@ test "a resource server's bearer check: JWT access tokens with the key set, or i
     try testing.expectEqualStrings("mcp", active.allowed.scope.?);
     const inactive = (try asking.check(io, &http, arena, "Bearer bad", &.{})).refused;
     try testing.expectEqualStrings("inactive", inactive.challenge.error_description.?);
+    // A token the server will not introspect is the client's to fix: a 401,
+    // not the 503 of a server that failed.
+    const unsupported = (try asking.check(io, &http, arena, "Bearer eyJ.structured.jwt", &.{})).refused;
+    try testing.expectEqual(std.http.Status.unauthorized, unsupported.status);
+    try testing.expectEqualStrings("unsupported_token_type", unsupported.challenge.error_description.?);
 }
 
 test "an ID token from the code flow: the flow's nonce and the access token's hash expected" {
