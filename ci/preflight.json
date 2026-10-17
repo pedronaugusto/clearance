@@ -4,7 +4,9 @@
   ],
   "test_roots": [
     "src/tests.zig",
-    "src/property_test.zig"
+    "src/property_test.zig",
+    "src/oauth/tests.zig",
+    "src/oauth/property_test.zig"
   ],
   "test_support": [
     "src/testing/**"
@@ -21,6 +23,13 @@
       "region": "verify",
       "imports": [
         "clearance"
+      ]
+    },
+    "zig build docs -- oauth": {
+      "source": "examples/discover.zig",
+      "region": "oauth",
+      "imports": [
+        "oauth"
       ]
     },
     "zig build docs -- sign": {

@@ -30,6 +30,7 @@
         .uplink = .{
             .url = "git+https://github.com/pedronaugusto/uplink?ref=v0.8.0#6b4d52c7be54ef8df5b659711d3e1092f5b5c7b0",
             .hash = "uplink-0.8.0-0eVSJldgFQCbf3Vo5jZ1dgJGkPP0b_X51kzMk3BS7nAR",
+            .lazy = true,
         },
     },
     .dev_dependencies = .{

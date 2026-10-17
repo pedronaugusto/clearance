@@ -6,8 +6,9 @@
 const std = @import("std");
 const aegis = @import("aegis");
 const form = @import("uplink.wire").form;
-const jws = @import("../jws.zig");
-const jwt = @import("../jwt.zig");
+const clearance = @import("clearance");
+const jws = clearance.jws;
+const jwt = clearance.jwt;
 const pkce = @import("pkce.zig");
 
 /// The methods clearance speaks, by their registered names.
@@ -211,7 +212,7 @@ test "the method is chosen from what the server lists, basic when it lists nothi
 
 test "private_key_jwt signs an assertion of the client, for the issuer, briefly" {
     const cloak = @import("cloak");
-    const jwk = @import("../jwk.zig");
+    const jwk = clearance.jwk;
     const gpa = std.testing.allocator;
     // RFC 8037 A.1's key, as PKCS#8.
     var der: [48]u8 = undefined;

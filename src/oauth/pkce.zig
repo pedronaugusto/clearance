@@ -3,7 +3,7 @@
 //! `nonce`.
 const std = @import("std");
 const aegis = @import("aegis");
-const base64url = @import("../base64url.zig");
+const base64url = @import("clearance").base64url;
 
 /// What `code_challenge_method` says.
 pub const method = "S256";

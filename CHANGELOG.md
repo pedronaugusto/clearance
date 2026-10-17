@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- Two modules: `clearance` is JWT and JOSE alone, on std, aegis, strand and cloak; OAuth 2.1 is the module `clearance.oauth` (the messages that were `clearance.oauth`, and the flows), built when a project sets the build option `oauth`. uplink is a lazy dependency, fetched only then: a project that verifies and signs tokens fetches no uplink.
+
+### Added
+
+- `clearance.oauth`, the flows on uplink's client, each request to an endpoint held to HTTPS, no redirect followed, each answer bounded and read into wiped memory when it carries secrets: `discover` (RFC 8414 and OpenID Connect locations in MCP's order, a 4xx trying the next, an issuer mismatch failing at once); `discoverResource` (RFC 9728, from a challenge's `resource_metadata` or the inserted then the root location); `bearerChallenge` (a 401's or 403's Bearer challenge from its `WWW-Authenticate` lines, for a step-up); `AuthorizationFlow` (`begin` draws the state, the PKCE verifier and the nonce and writes the URL; `finish` reads the redirect, `state` then RFC 9207's `iss`, and exchanges the code with the RFC 8707 resources); `requestToken`, `refresh` (the granted scope and refresh token kept when the answer leaves them out), `clientCredentials`, `register` (RFC 7591, with an initial access token); `fresh` (a store's tokens refreshed and saved when they near expiry, forgotten when the grant is spent); `RemoteKeySet` (a `jwks_uri` kept for its `Cache-Control` lifetime clamped to 5 minutes..24 hours, fetched again for an unknown `kid` at most once per cooldown, one fetch for every waiter, the set held kept through a failing key server for a grace, keys leased so a fetch never frees keys in use; `verify`); `Introspector` (RFC 7662 answers kept until the earlier of `exp` and a bound, keyed by the token's SHA-256, the count bounded).
+- `oauth.store`: the `TokenStore` interface (load, save, forget by key) and a store in memory.
+- End-to-end tests against an authorization server on uplink's server in the same process; the `discover` example, run by hand against Google, Microsoft and GitHub Actions.
+
+### Changed
+
+- Depends on uplink 0.8.1, lazily, with its client (for `wire.cache`).
+
 ## [0.1.1] - 2026-10-17
 
 ### Added

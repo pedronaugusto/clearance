@@ -1,6 +1,8 @@
-//! OAuth 2.1 messages, sans I/O: every request built and every response read
-//! and checked, for a caller with an HTTP stack of its own or for
-//! `clearance.http`, which performs them on uplink.
+//! OAuth 2.1 for Zig, on clearance's JOSE and uplink. Two layers: the
+//! messages, sans I/O (on `uplink.wire` alone): every request built and every
+//! response read and checked; and the flows performed on uplink's client:
+//! discovery, the authorization code flow with PKCE, refresh, client
+//! credentials, registration, remote key sets and introspection, kept.
 //!
 //! Each reader is bounded by a size, refuses a member of the wrong type or a
 //! member twice, and keeps an OAuth error response as a value
@@ -31,9 +33,63 @@ pub const introspection = @import("oauth/introspection.zig");
 /// Bearer challenges (RFC 6750 §3, RFC 9728 §5.1) read and written; step-up.
 pub const challenge = @import("oauth/challenge.zig");
 
+/// Where a client keeps its tokens: the interface and a store in memory.
+pub const store = @import("oauth/store.zig");
+
+// The flows, on uplink's client. Each takes the client and `io` per call and
+// keeps neither.
+
+const http = @import("oauth/http.zig");
+const http_discovery = http.discovery;
+const http_flow = http.flow;
+
+/// An authorization server's metadata, fetched from the locations its
+/// issuer makes (RFC 8414, OpenID Connect Discovery, in MCP's order).
+pub const discover = http_discovery.authorizationServer;
+/// A protected resource's metadata (RFC 9728), from its challenge's
+/// `resource_metadata` or its well-known locations.
+pub const discoverResource = http_discovery.protectedResource;
+/// The Bearer challenge of a resource's 401 or 403.
+pub const bearerChallenge = http_discovery.bearerChallenge;
+pub const DiscoverOptions = http_discovery.Options;
+pub const DiscoverError = http_discovery.Error;
+/// The authorization code flow with PKCE, begun and finished.
+pub const AuthorizationFlow = http_flow.AuthorizationFlow;
+/// A grant asked of the token endpoint.
+pub const requestToken = http_flow.requestToken;
+/// New tokens for a set's refresh token.
+pub const refresh = http_flow.refresh;
+/// Tokens for the client itself.
+pub const clientCredentials = http_flow.clientCredentials;
+/// Dynamic client registration (RFC 7591).
+pub const register = http_flow.register;
+/// The tokens a store keeps, refreshed first when they are about to expire.
+pub const fresh = http_flow.fresh;
+pub const TokenOptions = http_flow.TokenOptions;
+pub const TokenError = http_flow.TokenError;
+pub const RefreshError = http_flow.RefreshError;
+pub const RegisterOptions = http_flow.RegisterOptions;
+pub const RegisterError = http_flow.RegisterError;
+pub const FreshOptions = http_flow.FreshOptions;
+pub const FreshError = http_flow.FreshError;
+/// A JWK set kept from a `jwks_uri`: cached, refetched on an unknown key at
+/// most once per cooldown, one fetch for every waiter, leased.
+pub const RemoteKeySet = http.RemoteKeySet;
+/// Token introspection with its answers kept briefly.
+pub const Introspector = http.Introspector;
+/// The exchanges' options and errors.
+pub const fetch = http.fetch;
+
 pub const ErrorResponse = errors.ErrorResponse;
+pub const TokenStore = store.TokenStore;
 pub const TokenSet = token.TokenSet;
 pub const Client = client_auth.Client;
+
+const builtin = @import("builtin");
+
+test {
+    if (builtin.is_test) _ = @import("oauth/tests.zig");
+}
 
 test {
     _ = url;
@@ -46,4 +102,6 @@ test {
     _ = registration;
     _ = introspection;
     _ = challenge;
+    _ = store;
+    _ = http;
 }

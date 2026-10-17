@@ -1,26 +1,28 @@
 # clearance
 
-clearance is OAuth 2.1 and JOSE (JWT, JWS, JWK) for Zig. It has the JOSE
-layer: JSON Web Keys and key sets, JWS in the compact serialization, signed
-and verified, and JWTs whose claims are checked by type before value; and
-OAuth 2.1's messages without I/O: metadata, PKCE, the authorization request
-and its callback, token requests and responses, client authentication,
-registration, introspection and bearer challenges, for any HTTP stack. The
-flows performed on uplink's client, remote key sets, ID tokens and the
-resource server's bearer checks follow on the same layers.
+clearance is JWT and JOSE (JWS, JWK) and OAuth 2.1 for Zig. Two modules:
+
+- `clearance`: JSON Web Keys and key sets, JWS in the compact serialization,
+  signed and verified, and JWTs whose claims are checked by type before value.
+  On std, [cloak](https://github.com/pedronaugusto/cloak) (signatures),
+  [strand](https://github.com/pedronaugusto/strand) (JSON) and
+  [aegis](https://github.com/pedronaugusto/aegis) (checked types) alone.
+- `clearance.oauth`: OAuth 2.1 clients on
+  [uplink](https://github.com/pedronaugusto/uplink): discovery, the
+  authorization code flow with PKCE, refresh, client credentials,
+  registration, key sets kept from a `jwks_uri`, introspection, a token store;
+  and every message underneath, sans I/O, for any HTTP stack.
 
 Work in progress toward the public cut.
 
 ## Install
 
 Requires Zig 0.17.0. Fetch with `zig fetch --save
-git+https://github.com/pedronaugusto/clearance`, then take the `clearance`
-module through `b.dependency` and add it to your executable's imports. It
-depends on std, [cloak](https://github.com/pedronaugusto/cloak) (signatures),
-[strand](https://github.com/pedronaugusto/strand) (JSON),
-[aegis](https://github.com/pedronaugusto/aegis) (checked types) and
-[uplink](https://github.com/pedronaugusto/uplink)'s codecs alone
-(`uplink.wire`: URLs, forms, challenges; not its client).
+git+https://github.com/pedronaugusto/clearance`, then take the modules through
+`b.dependency` and add them to your executable's imports. A project that
+verifies and signs tokens takes `clearance` and fetches no uplink; one that
+speaks OAuth asks for it, `b.dependency("clearance", .{ .oauth = true })`, and
+takes `clearance.oauth` too (uplink is fetched then).
 
 ## Usage
 
@@ -81,6 +83,31 @@ try jwt.sign(gpa, io, &token.writer, .{ .kid = "hmac-1" }, .{
 ```
 <!-- END GENERATED -->
 
+A client finds an authorization server and the keys it signs with (the
+`discover` example runs this against live providers):
+
+<!-- BEGIN GENERATED zig build docs -- oauth -->
+```zig
+const oauth = @import("clearance.oauth");
+
+// The metadata from the issuer's well-known locations, its `issuer`
+// checked byte for byte against the one asked.
+var server = try oauth.discover(gpa, io, http, issuer, .{});
+defer server.deinit();
+// Its keys, kept for as long as their answer allows. A resource server
+// shares one set between its tasks and calls
+// `keys.verify(Claims, io, http, token, validation, now, &scratch)`.
+var keys = try oauth.RemoteKeySet.init(gpa, server.value.jwks_uri orelse return error.NoJwksUri, .{});
+defer keys.deinit();
+var lease = try keys.lease(io, http, .current);
+defer lease.release();
+```
+<!-- END GENERATED -->
+
+`oauth.AuthorizationFlow.begin` then writes the URL to open, and `finish`
+reads the redirect and exchanges the code; `oauth.fresh` keeps a store's
+tokens refreshed.
+
 ## Design
 
 - **No `none`, no algorithm confusion.** `Algorithm` has no value for `none`.
@@ -107,6 +134,11 @@ try jwt.sign(gpa, io, &token.writer, .{ .kid = "hmac-1" }, .{
   metadata the resource asked for; every endpoint is HTTPS (HTTP to loopback
   alone). A callback is read only under the request's `state`, and its `iss`
   (RFC 9207) is compared as a string, required when the server advertises it.
+- **Remote key sets that a rotation or a flood cannot break.** A set is kept
+  for its answer's `max-age` (clamped to 5 minutes..24 hours), fetched again
+  for an unknown `kid` at most once a minute, by one task while the others
+  wait, and kept through a failing key server for a grace. Keys are leased:
+  a fetch never frees keys a verification holds.
 - **Secrets in wiped memory.** Token requests (client secrets, verifiers,
   refresh tokens) and token sets live in aegis secret memory; `state` and
   `nonce` compare in constant time.
@@ -117,7 +149,10 @@ In this release: JWS compact serialization with HS256/384/512, RS256/384/512,
 PS256/384/512, ES256, ES384 and EdDSA (Ed25519, under both its names); JWK
 and JWK sets (RSA, EC P-256 and P-384, OKP Ed25519, oct); thumbprints (RFC
 7638) and their URIs (RFC 9278); JWT claims and explicit typing. OAuth 2.1
-messages: RFC 8414 and OpenID Connect Discovery metadata, RFC 9728 protected
+flows on uplink: discovery (RFC 8414, OpenID Connect, RFC 9728), the
+authorization code flow with PKCE, refresh, client credentials, RFC 7591
+registration, remote key sets, cached introspection, a token store kept fresh,
+the Bearer challenge read for a step-up. Their messages: RFC 8414 and OpenID Connect Discovery metadata, RFC 9728 protected
 resource metadata, PKCE (S256), the authorization request with RFC 8707
 resources and its callback with RFC 9207's `iss`, the authorization code,
 refresh and client credentials grants, client authentication (none,
@@ -135,7 +170,8 @@ revocation, token exchange, the JWT-bearer grant, DPoP, PAR and
 cloak verifies and signs (ECDSA in the fixed-width form JOSE uses, RSA
 PKCS#1 v1.5 and PSS, Ed25519); strand reads and writes JSON under limits;
 aegis wipes secrets and compares MACs in constant time; uplink's codecs
-parse URLs and challenges and encode forms;
+parse URLs, challenges and `Cache-Control` and encode forms, and its client
+carries the flows;
 [shakedown](https://github.com/pedronaugusto/shakedown) runs the tests and
 properties; [preflight](https://github.com/pedronaugusto/preflight) gates it.
 
@@ -146,7 +182,8 @@ and 8037, Wycheproof's `json_web_signature`, `json_web_key` and
 `json_web_crypto` files, and properties over every parser of untrusted input
 (tokens, key sets, claims, metadata, token, registration and introspection
 responses, callbacks, challenges), which `bay properties --fuzz` runs under Zig's
-fuzzer.
+fuzzer; and the flows end to end against an authorization server on uplink's
+server in the same process.
 
 ## Licence
 
