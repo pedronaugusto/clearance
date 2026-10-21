@@ -71,3 +71,13 @@ test "a set keeps the keys it can use and counts the rest by reason" {
     try std.testing.expectError(error.InvalidDocument, jwk.KeySet.parse(gpa, "[1,2]", .{}));
     try std.testing.expectError(error.TooLarge, jwk.KeySet.parse(gpa, doc, .{ .max_bytes = .literal("100B") }));
 }
+
+test "a key set's reading fails for memory as memory, never by leaving keys out" {
+    try std.testing.checkAllAllocationFailures(gpa, struct {
+        fn run(a: std.mem.Allocator) !void {
+            var set = try jwk.KeySet.parse(a, "{\"keys\":[{\"kty\":\"RSA\",\"n\":\"" ++ rfc7638_n ++ "\",\"e\":\"AQAB\"},{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}]}", .{});
+            defer set.deinit();
+            if (set.keys.len != 2) return error.KeysLeftOut;
+        }
+    }.run, .{});
+}

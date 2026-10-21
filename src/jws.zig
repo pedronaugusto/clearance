@@ -10,6 +10,7 @@ const base64url = @import("base64url.zig");
 const Algorithm = @import("Algorithm.zig").Algorithm;
 const hashLength = @import("Algorithm.zig").hashLength;
 const Key = @import("Key.zig");
+const jwk = @import("jwk.zig");
 
 const Writer = std.Io.Writer;
 /// Sizes in options: `.literal("16KiB")`.
@@ -346,6 +347,22 @@ pub const Signer = union(enum) {
         return switch (s) {
             inline else => |v| v.alg,
         };
+    }
+
+    /// A private JWK signing with `alg`, or, when null, the algorithm its
+    /// `alg` member names or its curve implies (ES256, ES384, EdDSA; an RSA
+    /// key names none). The signer borrows `private.key`.
+    pub fn fromJwk(private: *const jwk.PrivateKey, alg: ?Algorithm) error{InvalidKey}!Signer {
+        const chosen = alg orelse private.public.alg orelse switch (private.public.material) {
+            .ec => |ec| switch (ec.curve) {
+                .p256 => Algorithm.es256,
+                .p384 => Algorithm.es384,
+            },
+            .okp => Algorithm.eddsa,
+            .rsa, .hmac => return error.InvalidKey,
+        };
+        if (!private.public.fits(chosen)) return error.InvalidKey;
+        return .{ .private = .{ .alg = chosen, .key = private.key } };
     }
 };
 

@@ -85,6 +85,120 @@ test "RFC 8037 A.4 and A.5: Ed25519 signs the example to the RFC's bytes and ver
     try std.testing.expectEqualStrings(ed_token, out.written());
 }
 
+/// The cookbook's key for a vector as the file has it, private members and all.
+fn cookbookPrivate(comptime file: []const u8) !jwk.PrivateKey {
+    const Doc = struct { input: struct { key: std.json.Value } };
+    const doc = try std.json.parseFromSlice(Doc, gpa, @embedFile("testing/vectors/rfc7520/" ++ file), .{ .ignore_unknown_fields = true });
+    defer doc.deinit();
+    const text = try std.json.Stringify.valueAlloc(gpa, doc.value.input.key, .{});
+    defer gpa.free(text);
+    return jwk.PrivateKey.parse(gpa, text, .{});
+}
+
+test "RFC 7520 4.1: the cookbook's private RSA JWK signs the example to its bytes" {
+    var private = try cookbookPrivate("4_1.rsa_v15_signature.json");
+    defer private.deinit();
+    try std.testing.expectEqualStrings("bilbo.baggins@hobbiton.example", private.public.kid.?);
+    var buffer: [4096]u8 = undefined;
+    const expected = try cookbookCompact("4_1.rsa_v15_signature.json", &buffer);
+    // RSA PKCS#1 v1.5 is deterministic: the same header, the same token.
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try jws.sign(gpa, std.testing.io, &out.writer, .{ .kid = private.public.kid }, cookbook_payload, try jws.Signer.fromJwk(&private, .rs256));
+    try std.testing.expectEqualStrings(expected, out.written());
+    // An RSA key names no algorithm of its own, and the cookbook's JWK has no `alg`.
+    try std.testing.expectError(error.InvalidKey, jws.Signer.fromJwk(&private, null));
+    try std.testing.expectError(error.InvalidKey, jws.Signer.fromJwk(&private, .es256));
+}
+
+test "RFC 7520 4.2: the cookbook's private RSA JWK signs PS384, and the token verifies with its public half" {
+    var private = try cookbookPrivate("4_2.rsa-pss_signature.json");
+    defer private.deinit();
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try jws.sign(gpa, std.testing.io, &out.writer, .{}, cookbook_payload, try jws.Signer.fromJwk(&private, .ps384));
+    var scratch: [8192]u8 = undefined;
+    const verified = try jws.verify(out.written(), &.{private.public}, .{ .algorithms = &.{.ps384} }, &scratch);
+    try std.testing.expectEqualStrings(cookbook_payload, verified.payload);
+}
+
+test "RFC 7520 4.3: a P-521 private key is not one clearance signs with" {
+    try std.testing.expectError(error.UnsupportedKey, cookbookPrivate("4_3.ecdsa_signature.json"));
+}
+
+/// RFC 8037 A.1's private key.
+const ed_private_jwk = "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"d\":\"nWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A\",\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}";
+
+test "RFC 8037 A.1 and A.4: the private Ed25519 JWK signs the example to the RFC's bytes" {
+    var private = try jwk.PrivateKey.parse(gpa, ed_private_jwk, .{});
+    defer private.deinit();
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    // The curve implies EdDSA.
+    try jws.sign(gpa, std.testing.io, &out.writer, .{}, "Example of Ed25519 signing", try jws.Signer.fromJwk(&private, null));
+    try std.testing.expectEqualStrings(ed_token, out.written());
+    // The public half is RFC 8037 A.3's key: its thumbprint names this one.
+    var thumbprint: [43]u8 = undefined;
+    _ = std.base64.url_safe_no_pad.Encoder.encode(&thumbprint, &jwk.thumbprint(private.public));
+    try std.testing.expectEqualStrings("kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k", &thumbprint);
+}
+
+/// Wycheproof's P-256 signing key (json_web_signature_test.json, `kid-ec-sign`).
+const ec_private_jwk = "{\"kty\":\"EC\",\"crv\":\"P-256\",\"alg\":\"ES256\",\"kid\":\"kid-ec-sign\",\"x\":\"04N0xi21hshyvBp7I167sbE_bXqyqkAPfefdklMO7wY\",\"y\":\"UI8exy-C06a7DUnjIdENkxeFtHM4-l_41LqEw9nVgmw\",\"d\":\"yy49oPcINGK2ps0LmtxpB6UTEOiITghHBif6wDqmJ3c\"}";
+
+test "Wycheproof's private P-256 JWK signs ES256, and the token verifies with its public half alone" {
+    var private = try jwk.PrivateKey.parse(gpa, ec_private_jwk, .{});
+    defer private.deinit();
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try jws.sign(gpa, std.testing.io, &out.writer, .{}, "payload", try jws.Signer.fromJwk(&private, null));
+    var scratch: [2048]u8 = undefined;
+    _ = try jws.verify(out.written(), &.{private.public}, .{ .algorithms = &.{.es256} }, &scratch);
+    try std.testing.expectError(error.InvalidKey, jws.Signer.fromJwk(&private, .es384));
+}
+
+test "a private JWK is refused for what it is, each by its error" {
+    const cases = [_]struct { jwk.PrivateError, []const u8 }{
+        .{ error.NotPrivate, ed_public },
+        .{ error.UnsupportedKey, "{\"kty\":\"oct\",\"k\":\"AyM1SysPpbyDfgZld3umj1qzKObwVMkoqQ-EstJQLr_T-1qS0gZH75aKtMN3Yj0iPS4hcgUuTwjAzZr1Z9CAow\"}" },
+        .{ error.UnsupportedKey, "{\"kty\":\"OKP\",\"crv\":\"X25519\",\"d\":\"nWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A\",\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}" },
+        // The scalar is another key's: the public half derived from it is not this `x`.
+        .{ error.InvalidKey, "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"d\":\"oWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A\",\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}" },
+        .{ error.InvalidKey, "{\"kty\":\"EC\",\"crv\":\"P-256\",\"x\":\"04N0xi21hshyvBp7I167sbE_bXqyqkAPfefdklMO7wY\",\"y\":\"UI8exy-C06a7DUnjIdENkxeFtHM4-l_41LqEw9nVgmw\",\"d\":\"zy49oPcINGK2ps0LmtxpB6UTEOiITghHBif6wDqmJ3c\"}" },
+        // A member with an escape is not read: no key needs one.
+        .{ error.InvalidKey, "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"d\":\"\\u006eWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A\",\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}" },
+        .{ error.InvalidKey, "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"d\":7,\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}" },
+        .{ error.NotForSigning, "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"key_ops\":[\"verify\"],\"d\":\"nWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A\",\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}" },
+        .{ error.NotForSigning, "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"use\":\"enc\",\"d\":\"nWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A\",\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}" },
+        .{ error.InvalidAlgorithm, "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"alg\":\"ES256\",\"d\":\"nWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A\",\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}" },
+        .{ error.InvalidDocument, "[]" },
+    };
+    for (cases) |case| try std.testing.expectError(case[0], jwk.PrivateKey.parse(gpa, case[1], .{}));
+    try std.testing.expectError(error.TooLarge, jwk.PrivateKey.parse(gpa, ed_private_jwk, .{ .max_bytes = .literal("64B") }));
+}
+
+test "an RSA private JWK without its CRT members, or with more primes, is not one clearance signs with" {
+    const Doc = struct { input: struct { key: std.json.Value } };
+    inline for (.{ "p", "oth" }) |change| {
+        const doc = try std.json.parseFromSlice(Doc, gpa, @embedFile("testing/vectors/rfc7520/4_1.rsa_v15_signature.json"), .{ .ignore_unknown_fields = true });
+        defer doc.deinit();
+        var key = doc.value.input.key.object;
+        if (comptime std.mem.eql(u8, change, "p")) _ = key.swapRemove("p") else try key.put(doc.arena.allocator(), "oth", .{ .integer = 1 });
+        const text = try std.json.Stringify.valueAlloc(gpa, std.json.Value{ .object = key }, .{});
+        defer gpa.free(text);
+        try std.testing.expectError(error.UnsupportedKey, jwk.PrivateKey.parse(gpa, text, .{}));
+    }
+}
+
+test "every allocation a private JWK's reading makes is released when one fails" {
+    try std.testing.checkAllAllocationFailures(gpa, struct {
+        fn run(a: std.mem.Allocator) !void {
+            var private = try jwk.PrivateKey.parse(a, ec_private_jwk, .{});
+            private.deinit();
+        }
+    }.run, .{});
+}
+
 test "a signature made with each algorithm verifies with its key and no other" {
     const secret: [64]u8 = @splat(0x5c);
     var out: std.Io.Writer.Allocating = .init(gpa);

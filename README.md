@@ -68,8 +68,10 @@ const now = std.Io.Clock.real.now(io);
 the header, the registered claims, the claims as `Claims` and the key that
 verified the token, or the error naming the check that refused it.
 
-Signing, here with an HMAC secret (a cloak private key signs RS, PS, ES and
-EdDSA tokens the same way):
+Signing, here with an HMAC secret (a private JWK signs RS, PS, ES and EdDSA
+tokens the same way, read by `jwk.PrivateKey.parse` and given as
+`jws.Signer.fromJwk(&private, null)`, as does a cloak private key read from
+PEM or DER):
 
 <!-- BEGIN GENERATED zig build docs -- sign -->
 ```zig
@@ -164,7 +166,8 @@ user's token at an enterprise's identity provider for an ID-JAG, and
 
 In this release: JWS compact serialization with HS256/384/512, RS256/384/512,
 PS256/384/512, ES256, ES384 and EdDSA (Ed25519, under both its names); JWK
-and JWK sets (RSA, EC P-256 and P-384, OKP Ed25519, oct); thumbprints (RFC
+and JWK sets (RSA, EC P-256 and P-384, OKP Ed25519, oct), and private JWKs
+read for signing (RSA with its CRT members, EC P-256 and P-384, Ed25519); thumbprints (RFC
 7638) and their URIs (RFC 9278); JWT claims and explicit typing; ID tokens
 (OpenID Connect Core 3.1.3.7, `at_hash`) and RFC 9068 access tokens. OAuth 2.1
 flows on uplink: discovery (RFC 8414, OpenID Connect, RFC 9728), the
@@ -193,7 +196,8 @@ user needs one.
 ## Built with
 
 cloak verifies and signs (ECDSA in the fixed-width form JOSE uses, RSA
-PKCS#1 v1.5 and PSS, Ed25519); strand reads and writes JSON under limits;
+PKCS#1 v1.5 and PSS, Ed25519), checks every RSA public key (the ROCA
+fingerprint among the checks) and makes a private key from a JWK's numbers; strand reads and writes JSON under limits;
 aegis wipes secrets and compares MACs in constant time; uplink's codecs
 parse URLs, challenges and `Cache-Control` and encode forms, and its client
 carries the flows;
@@ -205,7 +209,7 @@ properties; [preflight](https://github.com/pedronaugusto/preflight) gates it.
 `bay test` runs the suite: the examples of RFC 7520 (the JOSE cookbook), 7638
 and 8037, Wycheproof's `json_web_signature`, `json_web_key` and
 `json_web_crypto` files, and properties over every parser of untrusted input
-(tokens, read verified or not, key sets, claims, metadata, token, exchange,
+(tokens, read verified or not, key sets, private keys, claims, metadata, token, exchange,
 ID-JAG, registration and introspection responses, callbacks, challenges), which `bay properties --fuzz` runs under Zig's
 fuzzer; and the flows end to end against an authorization server and an
 identity provider on uplink's server in the same process.

@@ -63,6 +63,30 @@ test "any bytes are read as a key set of usable keys, or refused" {
     try shake.check(std.testing.allocator, {}, anyKeySet, .{ .cases = 2000 });
 }
 
+const private_keys = [_][]const u8{
+    "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"d\":\"nWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A\",\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}",
+    "{\"kty\":\"EC\",\"crv\":\"P-256\",\"alg\":\"ES256\",\"x\":\"04N0xi21hshyvBp7I167sbE_bXqyqkAPfefdklMO7wY\",\"y\":\"UI8exy-C06a7DUnjIdENkxeFtHM4-l_41LqEw9nVgmw\",\"d\":\"yy49oPcINGK2ps0LmtxpB6UTEOiITghHBif6wDqmJ3c\"}",
+};
+
+/// Any bytes as a private JWK: refused, or a key whose signature its own
+/// public half verifies, and nothing left owned after deinit.
+fn anyPrivateKey(_: void, c: *shake.Case) !void {
+    var buffer: [512]u8 = undefined;
+    const input = shake.gen.mutated(c.source, &buffer, &private_keys);
+    var private = jwk.PrivateKey.parse(c.gpa, input, .{}) catch return;
+    defer private.deinit();
+    const signer = jws.Signer.fromJwk(&private, null) catch return;
+    var token: std.Io.Writer.Allocating = .init(c.gpa);
+    defer token.deinit();
+    try jws.sign(c.gpa, std.testing.io, &token.writer, .{}, "payload", signer);
+    var scratch: [jws.scratchLength(512)]u8 = undefined;
+    _ = try jws.verify(token.written(), &.{private.public}, .{ .algorithms = &.{signer.algorithm()} }, &scratch);
+}
+
+test "any bytes are read as a private key its public half verifies, or refused" {
+    try shake.check(std.testing.allocator, {}, anyPrivateKey, .{ .cases = 2000 });
+}
+
 /// Any claims under a valid signature: accepted or refused by a named check,
 /// never a crash.
 fn anyClaims(_: void, c: *shake.Case) !void {

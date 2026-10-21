@@ -29,10 +29,6 @@ const divergences = [_]Divergence{
     .{ .file = "json_web_signature_test.json", .tc_id = 370, .why = "identical to valid tcId 357" },
     .{ .file = "json_web_signature_test.json", .tc_id = 372, .why = "a ? in the header is not base64url" },
     .{ .file = "json_web_signature_test.json", .tc_id = 373, .why = "a ? in the payload is not base64url" },
-    // ROCA (CVE-2017-15361): the modulus fingerprint is not checked yet; it belongs in
-    // cloak's RSA key checks, for X.509 keys as for JWKs (clearance-complete).
-    .{ .file = "json_web_key_test.json", .tc_id = 7, .why = "ROCA fingerprint unchecked" },
-    .{ .file = "json_web_crypto_test.json", .tc_id = 46, .why = "ROCA fingerprint unchecked" },
 };
 
 fn diverges(file: []const u8, tc_id: i64) bool {
@@ -87,12 +83,12 @@ test "Wycheproof json_web_signature_test: every compact JWS accepted exactly whe
 
 test "Wycheproof json_web_key_test: key sets, duplicate and mixed keys" {
     const outcome = try campaign("json_web_key_test.json");
-    try std.testing.expectEqual(@as(usize, 25), outcome.passed);
+    try std.testing.expectEqual(@as(usize, 26), outcome.passed);
     try std.testing.expectEqual(@as(usize, 0), outcome.mismatches);
 }
 
 test "Wycheproof json_web_crypto_test: the compact JWS cases" {
     const outcome = try campaign("json_web_crypto_test.json");
-    try std.testing.expectEqual(@as(usize, 47), outcome.passed);
+    try std.testing.expectEqual(@as(usize, 48), outcome.passed);
     try std.testing.expectEqual(@as(usize, 0), outcome.mismatches);
 }

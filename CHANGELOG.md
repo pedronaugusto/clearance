@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- Pins uplink 0.8.7, cloak 0.19.0 and aegis 0.1.14 (were 0.8.1, 0.14.0 and 0.1.11): a build with clearance moves to those lines, and `jws.Signer.private` takes cloak 0.19's `PrivateKey`.
+- A JWK's RSA public key gets cloak's checks for every RSA public key: 2048 to 4096 bits, minimal integers, an odd exponent of 3 to 2^32-1 (an exponent of 5 to 8 bytes was read), and no ROCA fingerprint (CVE-2017-15361). Wycheproof's `json_web_key` tcId 7 and `json_web_crypto` tcId 46 now pass, where they were named divergences.
+- An `oct` key whose `k` holds a JSON escape is left out as invalid: no base64url text needs one, and the unescaped copy would sit outside wiped memory.
+
+### Added
+
+- `jwk.PrivateKey.parse`: a private JWK read for signing (RFC 7518 §6.2.2 and §6.3.2, RFC 8037 §2): EC P-256 and P-384, Ed25519, and two-prime RSA keys with their CRT members, made by cloak's `PrivateKey.fromComponents` through the checks a parsed key gets (the public half derived and compared). The document is read from a wiped copy and the private members decoded into wiped memory, both erased before it returns; `public` is the public half with the JWK's `kid`, `alg`, `use` and `key_ops`. Each refusal has its error (`jwk.PrivateError`).
+- `jws.Signer.fromJwk`: a private JWK as a signer, with an algorithm, or the one its `alg` names or its curve implies.
+- A property over private JWKs: any bytes are refused, or read as a key whose signature its public half verifies.
+
+### Fixed
+
+- A key set read out of memory fails with `OutOfMemory`. A key whose members could not be allocated was left out as invalid, and a set whose keys could not be allocated was refused as `InvalidDocument`.
+- `jwk.KeySet`'s copy of its document is wiped by `deinit`: it held the secret members the document had (an `oct` key's `k`, private members left out) in memory freed unwiped.
+
 ## [0.3.0] - 2026-10-17
 
 ### Breaking
