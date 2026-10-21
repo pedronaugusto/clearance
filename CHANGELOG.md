@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-21
+
 ### Breaking
 
 - Pins uplink 0.8.7, cloak 0.19.0 and aegis 0.1.14 (were 0.8.1, 0.14.0 and 0.1.11): a build with clearance moves to those lines, and `jws.Signer.private` takes cloak 0.19's `PrivateKey`.
@@ -106,7 +108,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `jwt`: claims read by type before value (a registered claim of the wrong JSON type refuses the token), `exp` required unless the validation says otherwise, `nbf`, `iat` and `max_age` with a bounded leeway, `iss`, `sub` and `aud` (a token with an audience refused by a verifier that names none), explicit typing (`at+jwt`, `dpop+jwt`), custom claims decoded into the caller's type; `sign`.
 - Tests: RFC 7520, 7638 and 8037 examples; Wycheproof's `json_web_signature`, `json_web_key` and `json_web_crypto` files (465 of 475 cases as the files say, 10 diverging by decision, each named in the harness); properties over tokens, key sets and claims, fuzzed in the release tier.
 
-[Unreleased]: https://github.com/pedronaugusto/clearance/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/pedronaugusto/clearance/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/pedronaugusto/clearance/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/pedronaugusto/clearance/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/pedronaugusto/clearance/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/pedronaugusto/clearance/compare/v0.2.1...v0.2.2
