@@ -25,6 +25,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/oauth/revocation.zig",
         "src/oauth/dpop.zig",
         "src/oauth/par.zig",
+        "src/oauth/request_object.zig",
         "src/oauth/userinfo.zig",
         "src/oauth/logout.zig",
         "src/oauth/registration.zig",

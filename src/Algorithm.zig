@@ -17,6 +17,8 @@ pub const Algorithm = enum {
     ps512,
     es256,
     es384,
+    /// ECDSA on P-521 with SHA-512 (RFC 7518 §3.4), on cloak's P-521.
+    es512,
     /// Ed25519 under its polymorphic name (RFC 8037), with an OKP key whose
     /// curve is Ed25519.
     eddsa,
@@ -48,7 +50,7 @@ pub const Algorithm = enum {
         return switch (a) {
             .hs256, .hs384, .hs512 => .hmac,
             .rs256, .rs384, .rs512, .ps256, .ps384, .ps512 => .rsa,
-            .es256, .es384 => .ec,
+            .es256, .es384, .es512 => .ec,
             .eddsa, .ed25519 => .okp,
         };
     }
@@ -58,7 +60,7 @@ pub const Algorithm = enum {
         return switch (a) {
             .hs256, .rs256, .ps256, .es256 => .sha256,
             .hs384, .rs384, .ps384, .es384 => .sha384,
-            .hs512, .rs512, .ps512 => .sha512,
+            .hs512, .rs512, .ps512, .es512 => .sha512,
             .eddsa, .ed25519 => null,
         };
     }
@@ -68,6 +70,7 @@ pub const Algorithm = enum {
         return switch (a) {
             .es256 => .p256,
             .es384 => .p384,
+            .es512 => .p521,
             else => null,
         };
     }
@@ -78,7 +81,7 @@ pub const Algorithm = enum {
         return switch (a) {
             .rs256, .rs384, .rs512 => .{ .rsa = a.hash().? },
             .ps256, .ps384, .ps512 => .{ .pss = .{ .hash = a.hash().?, .mgf_hash = a.hash().?, .salt_length = hashLength(a.hash().?) } },
-            .es256, .es384 => .{ .ecdsa_p1363 = a.hash().? },
+            .es256, .es384, .es512 => .{ .ecdsa_p1363 = a.hash().? },
             .eddsa, .ed25519 => .ed25519,
             .hs256, .hs384, .hs512 => unreachable, // MACs are not cloak's
         };

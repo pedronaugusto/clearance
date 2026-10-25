@@ -30,10 +30,10 @@ fn cookbookCompact(comptime file: []const u8, out: []u8) ![]const u8 {
 
 const cookbook_payload = "It\xe2\x80\x99s a dangerous business, Frodo, going out your door. You step onto the road, and if you don't keep your feet, there\xe2\x80\x99s no knowing where you might be swept off to.";
 
-test "RFC 7520 4.1, 4.2 and 4.4: the cookbook's RS256, PS384 and HS256 signatures verify" {
+test "RFC 7520 4.1 to 4.4: the cookbook's RS256, PS384, ES512 and HS256 signatures verify" {
     var buffer: [4096]u8 = undefined;
     var scratch: [8192]u8 = undefined;
-    inline for (.{ .{ "4_1.rsa_v15_signature.json", Algorithm.rs256 }, .{ "4_2.rsa-pss_signature.json", Algorithm.ps384 }, .{ "4_4.hmac-sha2_integrity_protection.json", Algorithm.hs256 } }) |row| {
+    inline for (.{ .{ "4_1.rsa_v15_signature.json", Algorithm.rs256 }, .{ "4_2.rsa-pss_signature.json", Algorithm.ps384 }, .{ "4_3.ecdsa_signature.json", Algorithm.es512 }, .{ "4_4.hmac-sha2_integrity_protection.json", Algorithm.hs256 } }) |row| {
         var set = try cookbookKey(row[0]);
         defer set.deinit();
         try std.testing.expectEqual(@as(usize, 1), set.keys.len);
@@ -47,13 +47,17 @@ test "RFC 7520 4.1, 4.2 and 4.4: the cookbook's RS256, PS384 and HS256 signature
     }
 }
 
-test "RFC 7520 4.3: ES512 is not an algorithm clearance has, so its signature is refused" {
+test "RFC 7520 4.3: ES512 is P-521's, refused under a P-256 or P-384 key and a signature of another length" {
     var buffer: [4096]u8 = undefined;
     var scratch: [8192]u8 = undefined;
     const token = try cookbookCompact("4_3.ecdsa_signature.json", &buffer);
-    var diagnostics: jws.Diagnostics = .{};
-    try std.testing.expectError(error.AlgorithmNotAllowed, jws.verify(token, &.{}, .{ .algorithms = all, .diagnostics = &diagnostics }, &scratch));
-    try std.testing.expectEqual(jws.Check.algorithm_unknown, diagnostics.check);
+    var set = try cookbookKey("4_3.ecdsa_signature.json");
+    defer set.deinit();
+    try std.testing.expectEqual(Key.Curve.p521, set.keys[0].material.ec.curve);
+    try std.testing.expect(set.keys[0].fits(.es512));
+    try std.testing.expect(!set.keys[0].fits(.es384));
+    // The signature three bytes short: r || s is 132 bytes for P-521.
+    try std.testing.expectError(error.InvalidSignature, jws.verify(token[0 .. token.len - 4], set.keys, .{ .algorithms = &.{.es512} }, &scratch));
 }
 
 const ed_public = "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}";
@@ -122,8 +126,24 @@ test "RFC 7520 4.2: the cookbook's private RSA JWK signs PS384, and the token ve
     try std.testing.expectEqualStrings(cookbook_payload, verified.payload);
 }
 
-test "RFC 7520 4.3: a P-521 private key is not one clearance signs with" {
-    try std.testing.expectError(error.UnsupportedKey, cookbookPrivate("4_3.ecdsa_signature.json"));
+test "RFC 7520 4.3: the cookbook's private P-521 JWK signs ES512, and the token verifies with its public half" {
+    var private = try cookbookPrivate("4_3.ecdsa_signature.json");
+    defer private.deinit();
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    // ES512 from the key's curve, the algorithm its JWK names none of.
+    try jws.sign(gpa, std.testing.io, &out.writer, .{}, cookbook_payload, try jws.Signer.fromJwk(&private, null));
+    var scratch: [8192]u8 = undefined;
+    const verified = try jws.verify(out.written(), &.{private.public}, .{ .algorithms = &.{.es512} }, &scratch);
+    try std.testing.expectEqual(Algorithm.es512, verified.header.alg);
+    try std.testing.expectEqualStrings(cookbook_payload, verified.payload);
+    // The public half written back reads as the same key.
+    var written: std.Io.Writer.Allocating = .init(gpa);
+    defer written.deinit();
+    try jwk.writePublic(&written.writer, private.public);
+    var again = try jwk.KeySet.parse(gpa, written.written(), .{});
+    defer again.deinit();
+    try std.testing.expectEqualSlices(u8, private.public.material.ec.point, again.keys[0].material.ec.point);
 }
 
 /// RFC 8037 A.1's private key.
@@ -273,7 +293,7 @@ test "verifying allocates nothing and needs only the scratch it asks for" {
 
 test "inspect reads a token it cannot verify, and refuses one that is not signed or not well formed" {
     var scratch: [4096]u8 = undefined;
-    // RFC 7520 4.3's ES512 token: an algorithm clearance does not verify, read all the same.
+    // RFC 7520 4.3's ES512 token, read without its key.
     var buffer: [4096]u8 = undefined;
     const es512 = try cookbookCompact("4_3.ecdsa_signature.json", &buffer);
     const read = try jws.inspect(es512, .literal("16KiB"), &scratch);

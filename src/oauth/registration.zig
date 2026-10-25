@@ -42,6 +42,29 @@ pub const ClientMetadata = struct {
     /// renders in an iframe, and whether it gets `iss` and `sid`.
     frontchannel_logout_uri: ?[]const u8 = null,
     frontchannel_logout_session_required: ?bool = null,
+    /// RFC 8705 §2.1.2: what of the certificate names the client under
+    /// `tls_client_auth`, one of these.
+    tls_client_auth_subject_dn: ?[]const u8 = null,
+    tls_client_auth_san_dns: ?[]const u8 = null,
+    tls_client_auth_san_uri: ?[]const u8 = null,
+    tls_client_auth_san_ip: ?[]const u8 = null,
+    tls_client_auth_san_email: ?[]const u8 = null,
+    /// RFC 8705 §3.4: the client asks for certificate-bound access tokens.
+    tls_client_certificate_bound_access_tokens: ?bool = null,
+    /// JAR (RFC 9101 §10.4) and OpenID Connect Registration: the request
+    /// object's signing algorithm, the encryption of it, and whether every
+    /// authorization request must carry one.
+    request_object_signing_alg: ?[]const u8 = null,
+    request_object_encryption_alg: ?[]const u8 = null,
+    request_object_encryption_enc: ?[]const u8 = null,
+    require_signed_request_object: ?bool = null,
+    /// OpenID Connect Registration §2: encrypted ID tokens and UserInfo
+    /// answers (`id_token.Expected.decryption`, `userinfo.Expected.encrypted`).
+    id_token_encrypted_response_alg: ?[]const u8 = null,
+    id_token_encrypted_response_enc: ?[]const u8 = null,
+    userinfo_signed_response_alg: ?[]const u8 = null,
+    userinfo_encrypted_response_alg: ?[]const u8 = null,
+    userinfo_encrypted_response_enc: ?[]const u8 = null,
 };
 
 pub const ApplicationType = enum { native, web };

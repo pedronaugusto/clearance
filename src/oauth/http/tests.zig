@@ -496,7 +496,7 @@ test "the code flow: PKCE, state, iss and the resource carried to the token endp
 
     var url_out: std.Io.Writer.Allocating = .init(gpa);
     defer url_out.deinit();
-    var flow = try oauth.AuthorizationFlow.begin(io, &server.value, .{
+    var flow = try oauth.AuthorizationFlow.begin(gpa, io, &server.value, .{
         .client_id = "app",
         .redirect_uri = "http://127.0.0.1:9/cb",
         .scope = "mcp",
@@ -577,7 +577,7 @@ test "a pushed authorization request: the parameters pushed, the browser sent wi
     try testing.expectEqual(oauth.errors.Code.invalid_request, refused.refused.code);
     var strict = server.value;
     strict.require_pushed_authorization_requests = true;
-    try testing.expectError(error.PushRequired, oauth.AuthorizationFlow.begin(io, &strict, begin, &url_out.writer));
+    try testing.expectError(error.PushRequired, oauth.AuthorizationFlow.begin(gpa, io, &strict, begin, &url_out.writer));
 }
 
 test "client credentials with Basic, refused with the server's error when the secret is wrong" {
@@ -1094,6 +1094,28 @@ test "a resource server's bearer check: JWT access tokens with the key set, or i
     const forged = (try verifier.check(io, &http, arena, .{ .authorization = "Bearer eyJhbGciOiJFZERTQSJ9.e30.AAAA" }, &.{})).refused;
     try testing.expectEqual(std.http.Status.unauthorized, forged.status);
 
+    // A certificate-bound token (RFC 8705 §3): taken over the connection
+    // whose certificate it names, refused over another or none; an unbound
+    // token over mutual TLS passes.
+    const certificate = "a client certificate's DER";
+    var x5t: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(certificate, &x5t, .{});
+    var x5t_text: [43]u8 = undefined;
+    var x5t_w: std.Io.Writer = .fixed(&x5t_text);
+    try clearance.base64url.encode(&x5t_w, &x5t);
+    token.clearRetainingCapacity();
+    try token.writer.writeAll("Bearer ");
+    try signClaims(gpa, io, &token.writer, "k1", .{ .iss = "https://as.example", .aud = "https://rs.example/mcp", .sub = "u1", .client_id = "app", .exp = now + 600, .iat = now, .jti = "j3", .cnf = .{ .@"x5t#S256" = @as([]const u8, &x5t_text) } });
+    _ = (try verifier.check(io, &http, arena, .{ .authorization = token.written(), .client_certificate = certificate }, &.{})).allowed;
+    const other_certificate = (try verifier.check(io, &http, arena, .{ .authorization = token.written(), .client_certificate = "another" }, &.{})).refused;
+    try testing.expectEqualStrings("binding", other_certificate.challenge.error_description.?);
+    const no_certificate = (try verifier.check(io, &http, arena, .{ .authorization = token.written() }, &.{})).refused;
+    try testing.expectEqualStrings("binding", no_certificate.challenge.error_description.?);
+    token.clearRetainingCapacity();
+    try token.writer.writeAll("Bearer ");
+    try signClaims(gpa, io, &token.writer, "k1", .{ .iss = "https://as.example", .aud = "https://rs.example/mcp", .sub = "u1", .client_id = "app", .exp = now + 600, .iat = now, .jti = "j4" });
+    _ = (try verifier.check(io, &http, arena, .{ .authorization = token.written(), .client_certificate = certificate }, &.{})).allowed;
+
     // Introspection: the provider answers for the token `good`, naming its
     // own base as the audience.
     var introspector = try oauth.Introspector.init(gpa, p.url(&buffer, "/introspect"), p.base, .{ .id = "rs", .credentials = .{ .client_secret_basic = "pw" } }, .{});
@@ -1115,7 +1137,7 @@ test "an ID token from the code flow: the flow's nonce and the access token's ha
     var w: std.Io.Writer.Allocating = .init(testing.allocator);
     defer w.deinit();
     const server: oauth.metadata.AuthorizationServer = .{ .issuer = "https://op.example", .authorization_endpoint = "https://op.example/authorize" };
-    var flow = try oauth.AuthorizationFlow.begin(io, &server, .{ .client_id = "app", .redirect_uri = "http://127.0.0.1/cb", .nonce = true }, &w.writer);
+    var flow = try oauth.AuthorizationFlow.begin(testing.allocator, io, &server, .{ .client_id = "app", .redirect_uri = "http://127.0.0.1/cb", .nonce = true }, &w.writer);
     defer flow.deinit();
     try testing.expect(std.mem.find(u8, w.written(), "&nonce=") != null);
 

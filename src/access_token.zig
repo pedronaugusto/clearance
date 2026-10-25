@@ -17,16 +17,35 @@ const Key = @import("Key.zig");
 const base64url = @import("base64url.zig");
 
 /// What the request proved a token must be bound to.
-pub const Binding = union(enum) {
-    /// Nothing: a bearer token. A bound one is refused.
-    none,
-    /// The RFC 7638 thumbprint of the key a DPoP proof verified with:
-    /// `cnf.jkt` must name it.
-    dpop: [32]u8,
-    /// The SHA-256 of the TLS client certificate's DER: `cnf`'s `x5t#S256`
-    /// must name it.
-    mtls: [32]u8,
+/// What the request proved; neither set is a bearer request.
+pub const Binding = struct {
+    /// The RFC 7638 thumbprint of the key a DPoP proof verified with: the
+    /// token's `cnf.jkt` must name it, and an unbound token presented with
+    /// a proof is refused (RFC 9449 §7.1).
+    dpop: ?[32]u8 = null,
+    /// The SHA-256 of the TLS client certificate's DER: a token bound by
+    /// `cnf`'s `x5t#S256` must name it (RFC 8705 §3). An unbound token over
+    /// mutual TLS passes: the certificate may only authenticate the client.
+    mtls: ?[32]u8 = null,
 };
+
+/// Holds a token's confirmation (its `jkt` and `x5t#S256`, decoded, or
+/// `other` for a `cnf` naming neither) to what the request proved: each
+/// binding the token has must be proved, and a DPoP proof needs a token
+/// bound to its key.
+pub fn holds(binding: Binding, jkt: ?[32]u8, x5t_s256: ?[32]u8, other: bool) error{ BoundToken, WrongBinding }!void {
+    if (binding.dpop) |t| {
+        const named = jkt orelse return error.WrongBinding;
+        if (!std.mem.eql(u8, &named, &t)) return error.WrongBinding;
+    } else if (jkt != null) return error.BoundToken;
+    if (x5t_s256) |named| {
+        const h = binding.mtls orelse return error.BoundToken;
+        if (!std.mem.eql(u8, &named, &h)) return error.WrongBinding;
+    }
+    // A confirmation method clearance cannot check binds to something no
+    // request here proves.
+    if (other) return error.BoundToken;
+}
 
 pub const Expected = struct {
     algorithms: []const Algorithm,
@@ -36,7 +55,7 @@ pub const Expected = struct {
     audience: []const u8,
     leeway: jwt.Duration = .literal("0s"),
     /// What the request proved: the token's `cnf` is held to it.
-    binding: Binding = .none,
+    binding: Binding = .{},
     max_bytes: aegis.units.Bytes(usize) = .literal("16KiB"),
     diagnostics: ?*jws.Diagnostics = null,
 };
@@ -129,20 +148,21 @@ pub fn verify(comptime Extra: type, token: []const u8, keys: []const Key, expect
 
 /// Holds a token's `cnf` to what the request proved.
 fn checkBinding(arena: std.mem.Allocator, cnf: ?strand.json.Raw, binding: Binding) error{ BoundToken, WrongBinding, InvalidClaims }!void {
-    const raw = cnf orelse return switch (binding) {
-        .none => {},
-        .dpop, .mtls => error.WrongBinding,
-    };
-    if (binding == .none) return error.BoundToken;
+    const raw = cnf orelse return holds(binding, null, null, false);
     const c = raw.parse(Confirmation, arena, .{ .ignore_unknown_fields = true }) catch return error.InvalidClaims;
-    const named, const proved = switch (binding) {
-        .none => unreachable, // returned above
-        .dpop => |t| .{ c.jkt, t },
-        .mtls => |h| .{ c.@"x5t#S256", h },
-    };
+    const jkt = try hash(c.jkt);
+    const x5t = try hash(c.@"x5t#S256");
+    return holds(binding, jkt, x5t, jkt == null and x5t == null);
+}
+
+/// A confirmation member's SHA-256, decoded; a member that is not one is
+/// a token bound to nothing a request can prove.
+fn hash(member: ?[]const u8) error{WrongBinding}!?[32]u8 {
+    const text = member orelse return null;
     var decoded: [32]u8 = undefined;
-    const bytes = base64url.decode(&decoded, named orelse return error.WrongBinding) catch return error.WrongBinding;
-    if (bytes.len != 32 or !std.mem.eql(u8, bytes, &proved)) return error.WrongBinding;
+    const bytes = base64url.decode(&decoded, text) catch return error.WrongBinding;
+    if (bytes.len != 32) return error.WrongBinding;
+    return decoded;
 }
 
 /// Whether the space-separated `scope` holds every one of `needed`.
@@ -211,13 +231,22 @@ test "a bound token passes only with the binding the request proved" {
     defer gpa.free(mtls_bound);
     try checkBound(dpop_bound, .{ .dpop = thumbprint });
     try checkBound(mtls_bound, .{ .mtls = certificate_hash });
+    // A DPoP proof over mutual TLS, for either token.
+    try checkBound(dpop_bound, .{ .dpop = thumbprint, .mtls = certificate_hash });
+    // An unbound token over mutual TLS: the certificate authenticates the
+    // client only (RFC 8705 §3 binds only what `cnf` names).
+    try checkBound(head ++ "}", .{ .mtls = certificate_hash });
     // Sent as a bearer token, bound elsewhere, or not bound at all.
-    try testing.expectError(error.BoundToken, checkBound(dpop_bound, .none));
-    try testing.expectError(error.BoundToken, checkBound(mtls_bound, .none));
+    try testing.expectError(error.BoundToken, checkBound(dpop_bound, .{}));
+    try testing.expectError(error.BoundToken, checkBound(mtls_bound, .{}));
     try testing.expectError(error.WrongBinding, checkBound(dpop_bound, .{ .dpop = certificate_hash }));
-    try testing.expectError(error.WrongBinding, checkBound(dpop_bound, .{ .mtls = thumbprint }));
+    try testing.expectError(error.BoundToken, checkBound(dpop_bound, .{ .mtls = thumbprint }));
+    try testing.expectError(error.WrongBinding, checkBound(mtls_bound, .{ .mtls = thumbprint }));
     try testing.expectError(error.WrongBinding, checkBound(mtls_bound, .{ .dpop = thumbprint }));
+    // A DPoP proof with an unbound token (RFC 9449 §7.1), and a `cnf` of a
+    // method clearance cannot check.
     try testing.expectError(error.WrongBinding, checkBound(head ++ "}", .{ .dpop = thumbprint }));
+    try testing.expectError(error.BoundToken, checkBound(head ++ ",\"cnf\":{\"jwk\":{}}}", .{ .mtls = certificate_hash }));
     try testing.expectError(error.InvalidClaims, checkBound(head ++ ",\"cnf\":7}", .{ .dpop = thumbprint }));
 }
 

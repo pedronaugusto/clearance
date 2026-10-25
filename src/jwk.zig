@@ -252,7 +252,7 @@ pub const PrivateError = error{
 } || std.mem.Allocator.Error;
 
 /// A private JWK read for signing (RFC 7518 §6.2.2, §6.3.2, RFC 8037 §2): an
-/// EC key on P-256 or P-384, an Ed25519 key, or a two-prime RSA key with its
+/// EC key on P-256, P-384 or P-521, an Ed25519 key, or a two-prime RSA key with its
 /// CRT members; `jws.Signer.fromJwk` signs with it. Or read for decrypting:
 /// an RSA, EC or X25519 key (RFC 8037 §3.2), which `jwe.Key.fromJwk` holds.
 pub const PrivateKey = struct {
@@ -333,8 +333,7 @@ pub const PrivateKey = struct {
                     .curve = switch (ec.curve) {
                         .p256 => .p256,
                         .p384 => .p384,
-                        // unreachable: `read` takes no `crv` but P-256 and P-384
-                        .p521 => unreachable,
+                        .p521 => .p521,
                     },
                     .d = private_scalar,
                     .public = ec.point,
@@ -428,8 +427,12 @@ fn read(arena: std.mem.Allocator, w: Wire, options: Reading, secrets: *Secrets, 
     } else if (std.mem.eql(u8, w.kty, "EC")) {
         if (private) return skip(why, .private);
         const crv = w.crv orelse return skip(why, .invalid);
-        const curve: Key.Curve = if (std.mem.eql(u8, crv, "P-256")) .p256 else if (std.mem.eql(u8, crv, "P-384")) .p384 else return skip(why, .unsupported);
-        const width: usize = if (curve == .p256) 32 else 48;
+        const curve: Key.Curve = if (std.mem.eql(u8, crv, "P-256")) .p256 else if (std.mem.eql(u8, crv, "P-384")) .p384 else if (std.mem.eql(u8, crv, "P-521")) .p521 else return skip(why, .unsupported);
+        const width: usize = switch (curve) {
+            .p256 => 32,
+            .p384 => 48,
+            .p521 => 66,
+        };
         const x = try decodeMember(arena, w.x) orelse return skip(why, .invalid);
         const y = try decodeMember(arena, w.y) orelse return skip(why, .invalid);
         // Exactly the field's width (RFC 7518 §6.2.1.2-3).
@@ -438,13 +441,8 @@ fn read(arena: std.mem.Allocator, w: Wire, options: Reading, secrets: *Secrets, 
         point[0] = 4;
         @memcpy(point[1..][0..width], x);
         @memcpy(point[1 + width ..], y);
-        const valid = switch (curve) {
-            .p256 => if (std.crypto.sign.ecdsa.EcdsaP256Sha256.PublicKey.fromSec1(point)) |_| true else |_| false,
-            .p384 => if (std.crypto.sign.ecdsa.EcdsaP384Sha384.PublicKey.fromSec1(point)) |_| true else |_| false,
-            // unreachable: the `crv` read above is P-256 or P-384
-            .p521 => unreachable,
-        };
-        if (!valid) return skip(why, .invalid);
+        // cloak's checks for every EC public key: on the curve, not the identity.
+        cloak.certificates.certificate.Algorithm.checkEc(curve, point) catch return skip(why, .invalid);
         key.material = .{ .ec = .{ .curve = curve, .point = point } };
     } else if (std.mem.eql(u8, w.kty, "OKP")) {
         if (private) return skip(why, .private);
@@ -643,7 +641,11 @@ fn writeRequired(w: *std.Io.Writer, key: Key) std.Io.Writer.Error!void {
         },
         .ec => |ec| {
             const width = (ec.point.len - 1) / 2;
-            try w.writeAll(if (ec.curve == .p256) "{\"crv\":\"P-256\",\"kty\":\"EC\",\"x\":\"" else "{\"crv\":\"P-384\",\"kty\":\"EC\",\"x\":\"");
+            try w.writeAll(switch (ec.curve) {
+                .p256 => "{\"crv\":\"P-256\",\"kty\":\"EC\",\"x\":\"",
+                .p384 => "{\"crv\":\"P-384\",\"kty\":\"EC\",\"x\":\"",
+                .p521 => "{\"crv\":\"P-521\",\"kty\":\"EC\",\"x\":\"",
+            });
             try base64url.encode(w, ec.point[1..][0..width]);
             try w.writeAll("\",\"y\":\"");
             try base64url.encode(w, ec.point[1 + width ..]);

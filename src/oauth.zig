@@ -40,6 +40,7 @@ pub const revocation = @import("oauth/revocation.zig");
 pub const dpop = @import("oauth/dpop.zig");
 /// Pushed authorization requests (RFC 9126).
 pub const par = @import("oauth/par.zig");
+pub const request_object = @import("oauth/request_object.zig");
 /// OpenID Connect's UserInfo: the claims read, the subject held.
 pub const userinfo = @import("oauth/userinfo.zig");
 /// OpenID Connect logout: the RP-initiated URL, the back-channel and
@@ -146,6 +147,7 @@ test {
     _ = revocation;
     _ = dpop;
     _ = par;
+    _ = request_object;
     _ = userinfo;
     _ = logout;
     _ = registration;

@@ -54,7 +54,7 @@ pub const DecryptionKey = struct {
         password: []const u8,
     };
 
-    pub const PrivateKind = enum { rsa, p256, p384, x25519 };
+    pub const PrivateKind = enum { rsa, p256, p384, p521, x25519 };
 
     /// A private JWK read for decrypting (`jwk.PrivateKey.parse` with
     /// `.purpose = .encryption`). Borrows `private`.
@@ -66,7 +66,7 @@ pub const DecryptionKey = struct {
             .ec => |ec| switch (ec.curve) {
                 .p256 => .p256,
                 .p384 => .p384,
-                .p521 => return error.InvalidKey,
+                .p521 => .p521,
             },
             .okp => |okp| if (okp.curve == .x25519) .x25519 else return error.InvalidKey,
             .hmac => return error.InvalidKey,
@@ -557,7 +557,7 @@ fn agreeInto(arena: std.mem.Allocator, key: *const DecryptionKey, alg: KeyManage
     };
     const held = key.material.private;
     const peer: []const u8 = switch (epk.material) {
-        .ec => |ec| if ((held.kind == .p256 and ec.curve == .p256) or (held.kind == .p384 and ec.curve == .p384)) ec.point else return error.InvalidHeader,
+        .ec => |ec| if (std.mem.eql(u8, @tagName(held.kind), @tagName(ec.curve))) ec.point else return error.InvalidHeader,
         .okp => |okp| if (held.kind == .x25519 and okp.curve == .x25519) okp.x else return error.InvalidHeader,
         .rsa, .hmac => return error.InvalidHeader,
     };

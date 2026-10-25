@@ -30,6 +30,13 @@ pub fn request(gpa: std.mem.Allocator, io: std.Io, client: client_auth.Client, a
     return client_auth.formRequest(gpa, io, client, pairs.items, context);
 }
 
+/// The push of a request object (RFC 9126 §3, RFC 9101): `request` alone
+/// beside the client's authentication, `client_id` as for `request`.
+pub fn requestObject(gpa: std.mem.Allocator, io: std.Io, client: client_auth.Client, object: []const u8, context: client_auth.Context) client_auth.Error!client_auth.FormRequest {
+    const pairs = [_]form.Pair{ .{ .name = "client_id", .value = client.id }, .{ .name = "request", .value = object } };
+    return client_auth.formRequest(gpa, io, client, if (client.credentials == .client_secret_basic) &pairs else pairs[1..], context);
+}
+
 /// What the push was answered with (RFC 9126 §2.2): the URI the browser
 /// takes to the authorization endpoint, and when it expires. Held inline.
 pub const Pushed = struct {
@@ -119,4 +126,17 @@ test "a 201 is read as the request_uri, anything else as the server's error or r
     try testing.expectError(error.UnexpectedStatus, readResponse(200, "{\"request_uri\":\"urn:x\",\"expires_in\":60}", now));
     const refused = try readResponse(400, "{\"error\":\"invalid_request\",\"error_description\":\"The redirect_uri is not valid for the given client\"}", now);
     try testing.expectEqual(errors.Code.invalid_request, refused.refused.code);
+}
+
+test "a pushed request object (RFC 9126 §3): request beside the client's authentication, client_id once" {
+    const context: client_auth.Context = .{ .issuer = "https://as.example", .now = .{ .nanoseconds = 0 } };
+    var basic = try requestObject(testing.allocator, testing.io, .{ .id = "s6BhdRkqt3", .credentials = .{ .client_secret_basic = "7Fjfp0ZBr1KtDRbnfVdmIw" } }, "e.y.j", context);
+    defer basic.deinit();
+    try testing.expectEqualStrings("client_id=s6BhdRkqt3&request=e.y.j", basic.body.expose());
+    for ([_]client_auth.Credentials{ .none, .tls_client_auth, .self_signed_tls_client_auth }) |credentials| {
+        var other = try requestObject(testing.allocator, testing.io, .{ .id = "s6BhdRkqt3", .credentials = credentials }, "e.y.j", context);
+        defer other.deinit();
+        try testing.expectEqualStrings("request=e.y.j&client_id=s6BhdRkqt3", other.body.expose());
+        try testing.expect(other.authorization == null);
+    }
 }

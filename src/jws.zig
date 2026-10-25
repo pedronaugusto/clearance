@@ -646,14 +646,14 @@ pub const Signer = union(enum) {
     }
 
     /// A private JWK signing with `alg`, or, when null, the algorithm its
-    /// `alg` member names or its curve implies (ES256, ES384, EdDSA; an RSA
+    /// `alg` member names or its curve implies (ES256, ES384, ES512, EdDSA; an RSA
     /// key names none). The signer borrows `private.key`.
     pub fn fromJwk(private: *const jwk.PrivateKey, alg: ?Algorithm) error{InvalidKey}!Signer {
         const chosen = alg orelse private.public.alg orelse switch (private.public.material) {
             .ec => |ec| switch (ec.curve) {
                 .p256 => Algorithm.es256,
                 .p384 => Algorithm.es384,
-                .p521 => return error.InvalidKey,
+                .p521 => Algorithm.es512,
             },
             .okp => Algorithm.eddsa,
             .rsa, .hmac => return error.InvalidKey,

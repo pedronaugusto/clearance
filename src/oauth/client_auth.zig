@@ -19,6 +19,12 @@ pub const Method = enum {
     client_secret_post,
     private_key_jwt,
     client_secret_jwt,
+    /// RFC 8705 §2.1: the TLS client certificate, chained to a CA the
+    /// server trusts, names the client.
+    tls_client_auth,
+    /// RFC 8705 §2.2: a self-signed TLS client certificate, matched against
+    /// the client's registered keys.
+    self_signed_tls_client_auth,
 
     pub fn name(m: Method) []const u8 {
         return @tagName(m);
@@ -43,6 +49,12 @@ pub const Credentials = union(Method) {
     /// A JWT the client signs with HS256 under its secret, its audience the
     /// issuer: a server that asks for it rather than the secret itself.
     client_secret_jwt: []const u8,
+    /// Mutual TLS (RFC 8705 §2): the certificate the HTTP client presents
+    /// (uplink's `tls.ClientOptions.client_auth`) authenticates; the body
+    /// carries `client_id` (§2). The certificate is the caller's to set on
+    /// the connection, not clearance's to send.
+    tls_client_auth,
+    self_signed_tls_client_auth,
 };
 
 pub const PrivateKeyJwt = struct {
@@ -56,6 +68,16 @@ pub const PrivateKeyJwt = struct {
 pub const Client = struct {
     id: []const u8,
     credentials: Credentials = .none,
+    /// The HTTP client presents a TLS certificate though the method is
+    /// another: a public client asking for certificate-bound tokens (RFC
+    /// 8705 §3, §4). The TLS methods imply it.
+    mutual_tls: bool = false,
+
+    /// Whether requests go over mutual TLS, and so to the server's
+    /// `mtls_endpoint_aliases` (RFC 8705 §5).
+    pub fn mutualTls(c: Client) bool {
+        return c.mutual_tls or c.credentials == .tls_client_auth or c.credentials == .self_signed_tls_client_auth;
+    }
 };
 
 /// The method to use with a server that lists `supported` (its metadata's
@@ -114,7 +136,7 @@ pub fn formRequest(gpa: std.mem.Allocator, io: std.Io, maybe_client: ?Client, pa
     var authorization: ?aegis.SecretBytes = null;
     errdefer if (authorization) |*a| a.deinit();
     if (maybe_client) |client| switch (client.credentials) {
-        .none => try all.append(gpa, .{ .name = "client_id", .value = client.id }),
+        .none, .tls_client_auth, .self_signed_tls_client_auth => try all.append(gpa, .{ .name = "client_id", .value = client.id }),
         .client_secret_post => |secret| try all.appendSlice(gpa, &.{
             .{ .name = "client_id", .value = client.id },
             .{ .name = "client_secret", .value = secret },
@@ -270,4 +292,19 @@ test "client_secret_jwt signs the assertion with HS256 under the secret" {
     try std.testing.expectEqual(clearance.Algorithm.hs256, verified.header.alg);
     // A secret shorter than the hash is no HS256 key (RFC 7518 §3.2).
     try std.testing.expectError(error.InvalidKey, formRequest(gpa, std.testing.io, .{ .id = "c", .credentials = .{ .client_secret_jwt = "short" } }, &.{}, .{ .issuer = "https://as.example", .now = now }));
+}
+
+test "the mutual TLS methods put client_id in the body, and choose the server's mTLS aliases" {
+    const ctx: Context = .{ .issuer = "https://as.example", .now = .{ .nanoseconds = 0 } };
+    for ([_]Credentials{ .tls_client_auth, .self_signed_tls_client_auth }) |credentials| {
+        const client: Client = .{ .id = "c", .credentials = credentials };
+        var r = try formRequest(std.testing.allocator, std.testing.io, client, &.{.{ .name = "a", .value = "1" }}, ctx);
+        defer r.deinit();
+        try std.testing.expectEqualStrings("a=1&client_id=c", r.body.expose());
+        try std.testing.expect(r.authorization == null);
+        try std.testing.expect(client.mutualTls());
+    }
+    try std.testing.expect(!(Client{ .id = "c" }).mutualTls());
+    try std.testing.expect((Client{ .id = "c", .mutual_tls = true }).mutualTls());
+    try std.testing.expectEqual(Method.tls_client_auth, choose(&.{ "private_key_jwt", "tls_client_auth" }, &.{ .self_signed_tls_client_auth, .tls_client_auth }).?);
 }
