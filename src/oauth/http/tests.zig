@@ -47,6 +47,10 @@ const Provider = struct {
     device_polls: u32 = 0,
     device_expires_in: u32 = 600,
     dpop_requests: u32 = 0,
+    /// A pushed request's parameters, kept for its `request_uri`.
+    pushed_buffer: [1024]u8 = undefined,
+    pushed: []const u8 = "",
+    pushes: u32 = 0,
     revoked_buffer: [32]u8 = undefined,
     revoked: []const u8 = "",
 
@@ -101,6 +105,21 @@ const Provider = struct {
             const expires_in = p.device_expires_in;
             p.mutex.unlock(io);
             return response.send(io, try arena.print("{{\"device_code\":\"dc-1\",\"user_code\":\"WDJB-MJHT\",\"verification_uri\":\"{s}/activate\",\"expires_in\":{d},\"interval\":1}}", .{ p.base, expires_in }));
+        }
+        if (std.mem.eql(u8, path, "/par")) {
+            const body = try request.collect(arena, io, .limited(4096));
+            if (!std.mem.eql(u8, field(arena, body, "client_id") orelse "", "app")) {
+                response.status = .unauthorized;
+                return response.send(io, "{\"error\":\"invalid_client\"}");
+            }
+            if (!std.mem.startsWith(u8, field(arena, body, "redirect_uri") orelse "", "http://127.0.0.1")) return refuse(io, response, "invalid_request");
+            p.mutex.lockUncancelable(io);
+            defer p.mutex.unlock(io);
+            p.pushes += 1;
+            @memcpy(p.pushed_buffer[0..body.len], body);
+            p.pushed = p.pushed_buffer[0..body.len];
+            response.status = .created;
+            return response.send(io, "{\"request_uri\":\"urn:ietf:params:oauth:request_uri:p1\",\"expires_in\":60}");
         }
         if (std.mem.eql(u8, path, "/revoke")) {
             const body = try request.collect(arena, io, .limited(4096));
@@ -165,15 +184,22 @@ const Provider = struct {
     fn metadata(p: *Provider, arena: std.mem.Allocator, issuer: []const u8) ![]const u8 {
         return arena.print(
             \\{{"issuer":"{s}","authorization_endpoint":"{s}/authorize","token_endpoint":"{s}/token","registration_endpoint":"{s}/register",
-            \\"jwks_uri":"{s}/jwks","introspection_endpoint":"{s}/introspect","device_authorization_endpoint":"{s}/device","revocation_endpoint":"{s}/revoke","code_challenge_methods_supported":["S256"],
+            \\"jwks_uri":"{s}/jwks","introspection_endpoint":"{s}/introspect","device_authorization_endpoint":"{s}/device","revocation_endpoint":"{s}/revoke","pushed_authorization_request_endpoint":"{s}/par","code_challenge_methods_supported":["S256"],
             \\"grant_types_supported":["authorization_code","refresh_token","client_credentials"],"authorization_response_iss_parameter_supported":true}}
-        , .{ issuer, p.base, p.base, p.base, p.base, p.base, p.base, p.base });
+        , .{ issuer, p.base, p.base, p.base, p.base, p.base, p.base, p.base, p.base });
     }
 
     /// What a browser would do: the request read, and the redirect back
     /// with a code, the state and `iss`.
     fn authorize(p: *Provider, io: Io, arena: std.mem.Allocator, request: *uplink.server.Request, response: *uplink.server.Response) !void {
-        const query = request.query orelse "";
+        var query = request.query orelse "";
+        // A pushed request: its parameters, as they were pushed.
+        if (field(arena, query, "request_uri")) |uri| {
+            if (!std.mem.eql(u8, uri, "urn:ietf:params:oauth:request_uri:p1") or !std.mem.eql(u8, field(arena, query, "client_id") orelse "", "app")) return error.UnknownRequestUri;
+            p.mutex.lockUncancelable(io);
+            query = try arena.dupe(u8, p.pushed);
+            p.mutex.unlock(io);
+        }
         const challenge = field(arena, query, "code_challenge") orelse return error.NoChallenge;
         const redirect = field(arena, query, "redirect_uri") orelse return error.NoRedirect;
         const state = field(arena, query, "state") orelse return error.NoState;
@@ -475,6 +501,49 @@ test "the code flow: PKCE, state, iss and the resource carried to the token endp
     try testing.expectEqualStrings("rt2", refreshed.tokens.refresh_token.?);
     // The granted scope is kept when the answer names none.
     try testing.expectEqualStrings("mcp", refreshed.tokens.scope.?);
+}
+
+test "a pushed authorization request: the parameters pushed, the browser sent with the request_uri, the code redeemed" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var p: Provider = undefined;
+    try p.start(io);
+    defer p.stop(io);
+    var http: uplink.Client = .init(gpa, .{});
+    defer http.deinit(io);
+    var server = try oauth.discover(gpa, io, &http, p.base, .{});
+    defer server.deinit();
+
+    var url_out: std.Io.Writer.Allocating = .init(gpa);
+    defer url_out.deinit();
+    const begin: oauth.AuthorizationFlow.Begin = .{ .client_id = "app", .redirect_uri = "http://127.0.0.1:9/cb", .scope = "mcp", .resources = &.{"https://rs.example/mcp"} };
+    var pushed = try oauth.AuthorizationFlow.push(gpa, io, &http, &server.value, .{ .id = "app" }, begin, &url_out.writer, .{});
+    var flow = &pushed.flow;
+    defer flow.deinit();
+    var buffer: [128]u8 = undefined;
+    const expected_url = try std.mem.concat(gpa, u8, &.{ p.url(&buffer, "/authorize"), "?client_id=app&request_uri=urn%3Aietf%3Aparams%3Aoauth%3Arequest_uri%3Ap1" });
+    defer gpa.free(expected_url);
+    try testing.expectEqualStrings(expected_url, url_out.written());
+    // The secrets went to the server, not into the URL.
+    try testing.expect(std.mem.find(u8, url_out.written(), "code_challenge") == null);
+
+    var answer = try http.send(io, .{ .url = url_out.written(), .redirects = .none });
+    const location = try gpa.dupe(u8, answer.headers.get("location").?);
+    defer gpa.free(location);
+    answer.deinit(io);
+    const response = try flow.finish(gpa, io, &http, &server.value, .{ .id = "app" }, location, .{});
+    var set = response.tokens;
+    defer set.deinit();
+    try testing.expectEqualStrings("at1", set.access_token);
+
+    // A refused push is the server's answer; a server that requires pushes
+    // is never sent a plain request.
+    url_out.clearRetainingCapacity();
+    const refused = try oauth.AuthorizationFlow.push(gpa, io, &http, &server.value, .{ .id = "app" }, .{ .client_id = "app", .redirect_uri = "https://elsewhere.example/cb" }, &url_out.writer, .{});
+    try testing.expectEqual(oauth.errors.Code.invalid_request, refused.refused.code);
+    var strict = server.value;
+    strict.require_pushed_authorization_requests = true;
+    try testing.expectError(error.PushRequired, oauth.AuthorizationFlow.begin(io, &strict, begin, &url_out.writer));
 }
 
 test "client credentials with Basic, refused with the server's error when the secret is wrong" {

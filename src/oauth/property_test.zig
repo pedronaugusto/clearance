@@ -117,6 +117,28 @@ test "any answer to a revocation is revoked on a 2xx, else the server's error or
     try shake.check(std.testing.allocator, {}, anyRevocation, .{ .cases = 1000 });
 }
 
+/// Any bytes as a push's answer under any status: a `request_uri` that can
+/// go back into a URL (printable, bounded) with a future expiry, the
+/// server's error, or refused.
+fn anyPushed(_: void, c: *shake.Case) !void {
+    var buffer: [512]u8 = undefined;
+    const input = shake.gen.mutated(c.source, &buffer, &.{ "{\"request_uri\":\"urn:ietf:params:oauth:request_uri:6esc_11ACC5bwc014ltc14eY22c\",\"expires_in\":60}", "{\"error\":\"invalid_request\"}" });
+    const status: u16 = if (shake.gen.boolean(c.source)) 201 else 400;
+    const response = oauth.par.readResponse(status, input, .{ .now = .{ .nanoseconds = 0 } }) catch return;
+    switch (response) {
+        .pushed => |p| {
+            const uri = p.request_uri.slice();
+            if (uri.len == 0 or p.request_uri.cut or p.expires_at <= 0) return error.BadPush;
+            for (uri) |ch| if (ch < 0x21 or ch > 0x7e) return error.Unprintable;
+        },
+        .refused => |e| if (e.name.len == 0) return error.EmptyError,
+    }
+}
+
+test "any bytes are read as a push's request_uri, the server's error, or refused" {
+    try shake.check(std.testing.allocator, {}, anyPushed, .{ .cases = 1000 });
+}
+
 /// Any bytes as a registration response.
 fn anyRegistration(_: void, c: *shake.Case) !void {
     var buffer: [512]u8 = undefined;

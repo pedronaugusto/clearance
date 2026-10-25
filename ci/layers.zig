@@ -23,6 +23,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/oauth/device.zig",
         "src/oauth/revocation.zig",
         "src/oauth/dpop.zig",
+        "src/oauth/par.zig",
         "src/oauth/registration.zig",
         "src/oauth/introspection.zig",
         "src/oauth/challenge.zig",

@@ -36,23 +36,75 @@ pub const WriteError = url.Error || std.Io.Writer.Error;
 /// Writes the authorization URL: `endpoint` (an endpoint URL, whose query is
 /// kept, RFC 6749 §3.1) with the request's parameters added.
 pub fn writeUrl(w: *std.Io.Writer, endpoint: []const u8, request: Request) WriteError!void {
+    var separator = try writeEndpoint(w, endpoint);
+    var it: Params = .{ .request = request };
+    while (it.next()) |pair| try param(w, &separator, pair);
+}
+
+/// Writes `endpoint` and returns the separator its first added parameter
+/// takes: its own query is kept (RFC 6749 §3.1).
+fn writeEndpoint(w: *std.Io.Writer, endpoint: []const u8) WriteError!u8 {
     const u = try url.endpoint(endpoint);
     try w.writeAll(endpoint);
-    var separator: u8 = if (std.mem.findScalar(u8, u.target, '?')) |at| (if (at + 1 == u.target.len or u.target[u.target.len - 1] == '&') 0 else '&') else '?';
-    const fixed = [_]form.Pair{
-        .{ .name = "response_type", .value = "code" },
-        .{ .name = "client_id", .value = request.client_id },
-        .{ .name = "redirect_uri", .value = request.redirect_uri },
-        .{ .name = "state", .value = request.state },
-        .{ .name = "code_challenge", .value = request.code_challenge },
-        .{ .name = "code_challenge_method", .value = pkce.method },
-    };
-    for (fixed) |pair| try param(w, &separator, pair);
-    if (request.scope) |scope| try param(w, &separator, .{ .name = "scope", .value = scope });
-    for (request.resources) |resource| try param(w, &separator, .{ .name = "resource", .value = resource });
-    if (request.nonce) |nonce| try param(w, &separator, .{ .name = "nonce", .value = nonce });
-    if (request.dpop_jkt) |jkt| try param(w, &separator, .{ .name = "dpop_jkt", .value = jkt });
-    for (request.extra) |pair| try param(w, &separator, pair);
+    return if (std.mem.findScalar(u8, u.target, '?')) |at| (if (at + 1 == u.target.len or u.target[u.target.len - 1] == '&') 0 else '&') else '?';
+}
+
+/// The authorization request's parameters in the order they are sent: one
+/// list, read by the URL and by a pushed request (RFC 9126 §2.1) alike.
+pub const Params = struct {
+    request: Request,
+    /// Whether `client_id` is among them: a pushed request leaves it to the
+    /// client's authentication when that carries it.
+    client_id: bool = true,
+    at: usize = 0,
+
+    pub fn next(it: *Params) ?form.Pair {
+        const r = it.request;
+        const fixed_count = 6;
+        while (true) {
+            const i = it.at;
+            it.at += 1;
+            if (i < fixed_count) {
+                const pair: form.Pair = switch (i) {
+                    0 => .{ .name = "response_type", .value = "code" },
+                    1 => .{ .name = "client_id", .value = r.client_id },
+                    2 => .{ .name = "redirect_uri", .value = r.redirect_uri },
+                    3 => .{ .name = "state", .value = r.state },
+                    4 => .{ .name = "code_challenge", .value = r.code_challenge },
+                    else => .{ .name = "code_challenge_method", .value = pkce.method },
+                };
+                if (i == 1 and !it.client_id) continue;
+                return pair;
+            }
+            var k = i - fixed_count;
+            if (k == 0) {
+                if (r.scope) |scope| return .{ .name = "scope", .value = scope };
+                continue;
+            }
+            k -= 1;
+            if (k < r.resources.len) return .{ .name = "resource", .value = r.resources[k] };
+            k -= r.resources.len;
+            if (k == 0) {
+                if (r.nonce) |nonce| return .{ .name = "nonce", .value = nonce };
+                continue;
+            }
+            if (k == 1) {
+                if (r.dpop_jkt) |jkt| return .{ .name = "dpop_jkt", .value = jkt };
+                continue;
+            }
+            k -= 2;
+            if (k < r.extra.len) return r.extra[k];
+            return null;
+        }
+    }
+};
+
+/// Writes the authorization URL of a pushed request (RFC 9126 §4): the
+/// client and the `request_uri` the push was answered with.
+pub fn writePushedUrl(w: *std.Io.Writer, endpoint: []const u8, client_id: []const u8, request_uri: []const u8) WriteError!void {
+    var separator = try writeEndpoint(w, endpoint);
+    try param(w, &separator, .{ .name = "client_id", .value = client_id });
+    try param(w, &separator, .{ .name = "request_uri", .value = request_uri });
 }
 
 fn param(w: *std.Io.Writer, separator: *u8, pair: form.Pair) std.Io.Writer.Error!void {
@@ -159,6 +211,22 @@ test "the authorization URL carries PKCE, the resources and the endpoint's own q
     try writeUrl(&w, "https://as.example/authorize", .{ .client_id = "c", .redirect_uri = "r", .state = "s", .code_challenge = "x" });
     try std.testing.expect(std.mem.startsWith(u8, w.buffered(), "https://as.example/authorize?response_type=code&"));
     try std.testing.expectError(error.NotHttps, writeUrl(&w, "http://as.example/authorize", .{ .client_id = "c", .redirect_uri = "r", .state = "s", .code_challenge = "x" }));
+}
+
+test "the parameters are one list: every member once, in order, client_id left out when asked" {
+    const request: Request = .{ .client_id = "c", .redirect_uri = "r", .state = "s", .code_challenge = "x", .scope = "a", .resources = &.{ "r1", "r2" }, .nonce = "n", .dpop_jkt = "j", .extra = &.{.{ .name = "prompt", .value = "login" }} };
+    var it: Params = .{ .request = request, .client_id = false };
+    const names = [_][]const u8{ "response_type", "redirect_uri", "state", "code_challenge", "code_challenge_method", "scope", "resource", "resource", "nonce", "dpop_jkt", "prompt" };
+    for (names) |n| try std.testing.expectEqualStrings(n, it.next().?.name);
+    try std.testing.expectEqual(@as(?form.Pair, null), it.next());
+    var bare: Params = .{ .request = .{ .client_id = "c", .redirect_uri = "r", .state = "s", .code_challenge = "x" } };
+    var count: usize = 0;
+    while (bare.next()) |_| count += 1;
+    try std.testing.expectEqual(@as(usize, 6), count);
+    var buffer: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buffer);
+    try writePushedUrl(&w, "https://as.example/authorize", "s6BhdRkqt3", "urn:ietf:params:oauth:request_uri:6esc_11ACC5bwc014ltc14eY22c");
+    try std.testing.expectEqualStrings("https://as.example/authorize?client_id=s6BhdRkqt3&request_uri=urn%3Aietf%3Aparams%3Aoauth%3Arequest_uri%3A6esc_11ACC5bwc014ltc14eY22c", w.buffered());
 }
 
 test "a callback is checked for state, then iss, then read" {

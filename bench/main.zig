@@ -1,7 +1,8 @@
 //! clearance's benchmarks: JWT and JWS verification and signing per
 //! algorithm, key sets read, DPoP proofs signed and verified; and OAuth's
 //! messages: a token response read
-//! into a `TokenSet`, a device authorization read (RFC 8628), a revocation request written and answered (RFC 7009), an authorization server's metadata read, an
+//! into a `TokenSet`, a device authorization read (RFC 8628), a revocation request written and answered (RFC 7009), a pushed request
+//! written and answered (RFC 9126), an authorization server's metadata read, an
 //! authorization URL written with its PKCE verifier and state drawn. `bay bench` runs them in ReleaseFast and
 //! writes one JSON line per row to stdout; `bay test` runs each row once with
 //! `--smoke`. Timings are taken by hand, never in CI.
@@ -12,7 +13,7 @@ const shakedown = @import("shakedown");
 const provenance = @import("preflight_bench_options");
 
 const WorkloadError = clearance.jwt.VerifyError || clearance.dpop.VerifyError || clearance.jwk.PrivateError || clearance.jwt.SignError || clearance.jwk.ParseError ||
-    oauth.token.ReadError || oauth.device.ReadError || oauth.revocation.ReadError || oauth.client_auth.Error || oauth.metadata.ReadError || oauth.authorize.WriteError || error{Refused};
+    oauth.token.ReadError || oauth.device.ReadError || oauth.revocation.ReadError || oauth.par.ReadError || oauth.client_auth.Error || oauth.metadata.ReadError || oauth.authorize.WriteError || error{Refused};
 const Row = shakedown.bench.Row(Bench, WorkloadError);
 
 const secret: [32]u8 = @splat(0x2a);
@@ -168,6 +169,20 @@ const Bench = struct {
         }
     }
 
+    /// RFC 9126 §2.1's pushed request built with Basic, and §2.2's answer
+    /// read.
+    fn pushRequest(b: *Bench, units: u64) WorkloadError!void {
+        const client: oauth.Client = .{ .id = "s6BhdRkqt3", .credentials = .{ .client_secret_basic = "7Fjfp0ZBr1KtDRbnfVdmIw" } };
+        const ask: oauth.authorize.Request = .{ .client_id = "s6BhdRkqt3", .redirect_uri = "https://client.example.org/cb", .state = "af0ifjsldkj", .code_challenge = "K2-ltc83acc4h0c9w6ESC_rEMTJ3bww-uCHaoeK1t8U", .scope = "openid" };
+        for (0..units) |_| {
+            var request = try oauth.par.request(b.gpa, b.io, client, ask, .{ .issuer = "https://server.example.com", .now = .{ .nanoseconds = 0 } });
+            b.sink +%= request.body.len();
+            request.deinit();
+            const answer = try oauth.par.readResponse(201, "{\"request_uri\":\"urn:ietf:params:oauth:request_uri:6esc_11ACC5bwc014ltc14eY22c\",\"expires_in\":60}", .{ .now = .{ .nanoseconds = 0 } });
+            b.sink +%= answer.pushed.request_uri.len;
+        }
+    }
+
     fn readMetadata(b: *Bench, units: u64) WorkloadError!void {
         for (0..units) |_| {
             var parsed = try oauth.metadata.readAuthorizationServer(b.gpa, metadata, "https://server.example.com", .{});
@@ -215,6 +230,7 @@ const rows = [_]Row{
     .{ .name = "oauth/read-token-response", .unit = "response", .run = Bench.readTokenResponse },
     .{ .name = "oauth/read-device-authorization", .unit = "response", .run = Bench.readDeviceAuthorization },
     .{ .name = "oauth/revocation-request", .unit = "request", .run = Bench.revokeRequest },
+    .{ .name = "oauth/par-request", .unit = "request", .run = Bench.pushRequest },
     .{ .name = "oauth/read-metadata-rfc8414", .unit = "document", .run = Bench.readMetadata },
     .{ .name = "oauth/write-authorization-url", .unit = "url", .run = Bench.writeAuthorizationUrl },
 };

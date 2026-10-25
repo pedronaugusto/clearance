@@ -17,6 +17,7 @@ const registration = @import("../registration.zig");
 const id_jag = @import("../id_jag.zig");
 const device = @import("../device.zig");
 const revocation = @import("../revocation.zig");
+const par = @import("../par.zig");
 const store = @import("../store.zig");
 const dpop = @import("../dpop.zig");
 const errors = @import("../errors.zig");
@@ -77,12 +78,28 @@ const Sent = struct {
 
 fn send(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, server: *const Server, client: ?Client, grant: token.Grant, options: TokenOptions) (fetch.Error || client_auth.Error || error{NoTokenEndpoint})!Sent {
     const endpoint = server.token_endpoint orelse return error.NoTokenEndpoint;
+    const Builder = struct {
+        client: ?Client,
+        grant: token.Grant,
+        options: TokenOptions,
+        issuer: []const u8,
+        fn build(b: @This(), g: std.mem.Allocator, i: std.Io, now: std.Io.Timestamp) client_auth.Error!client_auth.FormRequest {
+            return token.request(g, i, b.client, b.grant, .{ .resources = b.options.resources, .extra = b.options.extra }, .{ .issuer = b.issuer, .now = now });
+        }
+    };
+    return postProved(gpa, io, http, endpoint, options, Builder{ .client = client, .grant = grant, .options = options, .issuer = server.issuer });
+}
+
+/// POSTs the form request `builder` makes to `endpoint`, with a DPoP proof
+/// when `options.dpop` is set: a nonce the server answers with is kept,
+/// and a request it refused for want of one is made again, once, with it
+/// (RFC 9449 §8). Each attempt is built again: a client assertion's `jti`
+/// is spent by the first.
+fn postProved(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, endpoint: []const u8, options: TokenOptions, builder: anytype) (fetch.Error || client_auth.Error)!Sent {
     var attempt: u8 = 0;
     while (true) : (attempt += 1) {
         const now = std.Io.Clock.real.now(io);
-        // Built again for a second attempt: a client assertion's `jti` is
-        // spent by the first.
-        var request = try token.request(gpa, io, client, grant, .{ .resources = options.resources, .extra = options.extra }, .{ .issuer = server.issuer, .now = now });
+        var request = try builder.build(gpa, io, now);
         defer request.deinit();
         var proof: std.Io.Writer.Allocating = .init(gpa);
         defer proof.deinit();
@@ -90,7 +107,6 @@ fn send(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, server: *const
         var answer = try fetch.postForm(gpa, io, http, endpoint, &request, if (options.dpop != null) proof.written() else null, options.max_bytes, options.fetch);
         const session = options.dpop orelse return .{ .answer = answer, .at = now };
         if (answer.dpop_nonce) |*n| session.remember(io, endpoint, n.slice());
-        // The server asks for its nonce (RFC 9449 §8): sent once more with it.
         if (attempt == 0 and answer.dpop_nonce != null and answer.status == 400 and isNonceError(answer.body.expose())) {
             answer.deinit();
             continue;
@@ -216,12 +232,71 @@ pub const AuthorizationFlow = struct {
         NoAuthorizationEndpoint,
         /// `require_pkce_listed`, and the metadata does not list S256.
         PkceNotSupported,
+        /// The server requires pushed requests (RFC 9126 §5): `push`.
+        PushRequired,
     };
 
     /// Draws the state, the verifier and the nonce from `io`, and writes the
     /// URL to open into `w`.
     pub fn begin(io: std.Io, server: *const Server, request: Begin, w: *std.Io.Writer) BeginError!AuthorizationFlow {
         const endpoint = server.authorization_endpoint orelse return error.NoAuthorizationEndpoint;
+        if (server.require_pushed_authorization_requests) return error.PushRequired;
+        var flow = try start(io, server, request);
+        errdefer flow.deinit();
+        var jkt: [43]u8 = undefined;
+        try authorize.writeUrl(w, endpoint, flow.parameters(request, &jkt));
+        return flow;
+    }
+
+    pub const Pushed = union(enum) {
+        flow: AuthorizationFlow,
+        /// The server refused the pushed request (RFC 9126 §2.3).
+        refused: errors.ErrorResponse,
+    };
+
+    pub const PushError = authorize.WriteError || fetch.Error || client_auth.Error || par.ReadError || error{
+        NoAuthorizationEndpoint,
+        PkceNotSupported,
+        /// The metadata names no pushed authorization request endpoint.
+        NoPushEndpoint,
+    };
+
+    /// Pushes the request to `server` (RFC 9126), authenticated as `client`
+    /// (with a DPoP proof when `options.dpop` is set, which then binds the
+    /// code as well), and writes the URL to open into `w`: the client and
+    /// the `request_uri` the server answered with. `finish` reads the
+    /// redirect as for `begin`.
+    pub fn push(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, server: *const Server, client: Client, request: Begin, w: *std.Io.Writer, options: TokenOptions) PushError!Pushed {
+        const endpoint = server.authorization_endpoint orelse return error.NoAuthorizationEndpoint;
+        const push_endpoint = server.pushed_authorization_request_endpoint orelse return error.NoPushEndpoint;
+        var flow = start(io, server, request) catch |err| return switch (err) {
+            error.PkceNotSupported => error.PkceNotSupported,
+        };
+        errdefer flow.deinit();
+        var jkt: [43]u8 = undefined;
+        const ask = flow.parameters(request, &jkt);
+        const Builder = struct {
+            client: Client,
+            ask: authorize.Request,
+            issuer: []const u8,
+            fn build(b: @This(), g: std.mem.Allocator, i: std.Io, now: std.Io.Timestamp) client_auth.Error!client_auth.FormRequest {
+                return par.request(g, i, b.client, b.ask, .{ .issuer = b.issuer, .now = now });
+            }
+        };
+        var sent = try postProved(gpa, io, http, push_endpoint, options, Builder{ .client = client, .ask = ask, .issuer = server.issuer });
+        defer sent.answer.deinit();
+        switch (try par.readResponse(sent.answer.status, sent.answer.body.expose(), .{ .now = sent.at, .max_bytes = options.max_bytes })) {
+            .refused => |e| {
+                flow.deinit();
+                return .{ .refused = e };
+            },
+            .pushed => |p| try authorize.writePushedUrl(w, endpoint, client.id, p.request_uri.slice()),
+        }
+        return .{ .flow = flow };
+    }
+
+    /// The flow's secrets drawn, before any request is written.
+    fn start(io: std.Io, server: *const Server, request: Begin) error{PkceNotSupported}!AuthorizationFlow {
         if (request.require_pkce_listed and !server.supportsPkce()) return error.PkceNotSupported;
         var flow: AuthorizationFlow = .{
             .pkce = .generate(io),
@@ -231,20 +306,24 @@ pub const AuthorizationFlow = struct {
             .scope = request.scope,
             .resources = request.resources,
         };
-        errdefer flow.deinit();
         pkce.random(io, &flow.state);
         if (request.nonce) {
             var nonce: [pkce.length]u8 = undefined;
             pkce.random(io, &nonce);
             flow.nonce = nonce;
         }
-        var jkt: [43]u8 = undefined;
+        return flow;
+    }
+
+    /// The authorization request's parameters: borrowed from `flow`,
+    /// `request` and `jkt`, which holds the DPoP thumbprint when there is one.
+    fn parameters(flow: *const AuthorizationFlow, request: Begin, jkt: *[43]u8) authorize.Request {
         if (request.dpop) |session| {
-            var jw: std.Io.Writer = .fixed(&jkt);
+            var jw: std.Io.Writer = .fixed(jkt);
             // unreachable: a SHA-256 is 43 base64url characters
             clearance.base64url.encode(&jw, &session.thumbprint()) catch unreachable;
         }
-        try authorize.writeUrl(w, endpoint, .{
+        return .{
             .client_id = request.client_id,
             .redirect_uri = request.redirect_uri,
             .state = &flow.state,
@@ -252,10 +331,9 @@ pub const AuthorizationFlow = struct {
             .scope = request.scope,
             .resources = request.resources,
             .nonce = if (flow.nonce) |*n| n else null,
-            .dpop_jkt = if (request.dpop != null) &jkt else null,
+            .dpop_jkt = if (request.dpop != null) jkt else null,
             .extra = request.extra,
-        });
-        return flow;
+        };
     }
 
     /// Verifies the ID token `set` brought (`error.NoIdToken` when none):
