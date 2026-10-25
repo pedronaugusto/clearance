@@ -168,3 +168,25 @@ test "any bytes are a DPoP proof of the request expected, by the key it carries,
     try dpop.writeProof(gpa, std.testing.io, &out.writer, &key, .{ .htm = "POST", .htu = "https://as.example/token" }, now);
     try shake.check(gpa, ProofCase{ .proof = out.written(), .now = now }, anyProof, .{ .cases = 1000 });
 }
+
+const logout = @import("logout.zig");
+
+/// Any bytes as a logout token: refused, or verified as one, from the
+/// provider for the client, naming a user or a session.
+fn anyLogoutToken(token: []const u8, c: *shake.Case) !void {
+    var buffer: [1024]u8 = undefined;
+    const input = shake.gen.mutated(c.source, &buffer, &.{token});
+    const secret: [32]u8 = @splat(0x4c);
+    var scratch: [jws.scratchLength(1024)]u8 = undefined;
+    const v = logout.verifyToken(std.testing.io, input, &.{Key.hmac(&secret)}, .{ .algorithms = &.{.hs256}, .issuer = "https://server.example.com", .client_id = "s6BhdRkqt3" }, .{ .nanoseconds = 1_471_566_200 * std.time.ns_per_s }, &scratch) catch return;
+    if (v.sub == null and v.sid == null) return error.NamesNobody;
+}
+
+test "any bytes are a logout token for this client, naming a user or a session, or refused" {
+    const gpa = std.testing.allocator;
+    const secret: [32]u8 = @splat(0x4c);
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try jws.sign(gpa, std.testing.io, &out.writer, .{ .typ = logout.media_type }, "{\"iss\":\"https://server.example.com\",\"sub\":\"248289761001\",\"aud\":\"s6BhdRkqt3\",\"iat\":1471566154,\"exp\":1471566274,\"jti\":\"bWJq\",\"sid\":\"08a5019c\",\"events\":{\"http://schemas.openid.net/event/backchannel-logout\":{}}}", .{ .hmac = .{ .alg = .hs256, .secret = &secret } });
+    try shake.check(gpa, @as([]const u8, out.written()), anyLogoutToken, .{ .cases = 1000 });
+}

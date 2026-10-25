@@ -31,6 +31,17 @@ pub const ClientMetadata = struct {
     /// application on the user's device, `web` for one a server runs; MCP
     /// asks every client to name it when it registers.
     application_type: ?ApplicationType = null,
+    /// OpenID Connect RP-Initiated Logout 1.0 §3.1: where the provider may
+    /// send the browser after a logout.
+    post_logout_redirect_uris: ?[]const []const u8 = null,
+    /// OpenID Connect Back-Channel Logout 1.0 §2.2: where logout tokens are
+    /// POSTed, and whether they must carry `sid`.
+    backchannel_logout_uri: ?[]const u8 = null,
+    backchannel_logout_session_required: ?bool = null,
+    /// OpenID Connect Front-Channel Logout 1.0 §2: the page the provider
+    /// renders in an iframe, and whether it gets `iss` and `sid`.
+    frontchannel_logout_uri: ?[]const u8 = null,
+    frontchannel_logout_session_required: ?bool = null,
 };
 
 pub const ApplicationType = enum { native, web };

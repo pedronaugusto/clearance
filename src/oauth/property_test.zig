@@ -162,6 +162,25 @@ test "any bytes are read as the expected user's claims, the resource's refusal, 
     try shake.check(std.testing.allocator, {}, anyUserInfo, .{ .cases = 1000 });
 }
 
+/// Any bytes as a logout request: a back-channel body gives one non-empty
+/// token or is refused; a front-channel query gives `iss` and `sid`
+/// together, `iss` the provider's.
+fn anyLogoutRequest(_: void, c: *shake.Case) !void {
+    var buffer: [256]u8 = undefined;
+    var scratch: [256]u8 = undefined;
+    const input = shake.gen.mutated(c.source, &buffer, &.{ "logout_token=eyJ.a.b", "iss=https%3A%2F%2Fserver.example.com&sid=08a5019c" });
+    if (oauth.logout.readBackChannel(input, &scratch)) |token| {
+        if (token.len == 0) return error.EmptyToken;
+    } else |_| {}
+    const f = oauth.logout.readFrontChannel(input, "https://server.example.com", false, &scratch) catch return;
+    if ((f.iss == null) != (f.sid == null)) return error.HalfSession;
+    if (f.iss) |iss| if (!std.mem.eql(u8, iss, "https://server.example.com")) return error.WrongIssuer;
+}
+
+test "any logout request is read as one token, or iss and sid together from the provider, or refused" {
+    try shake.check(std.testing.allocator, {}, anyLogoutRequest, .{ .cases = 1000 });
+}
+
 /// Any bytes as a registration response.
 fn anyRegistration(_: void, c: *shake.Case) !void {
     var buffer: [512]u8 = undefined;

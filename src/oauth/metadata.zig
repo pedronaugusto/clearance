@@ -42,6 +42,13 @@ pub const AuthorizationServer = struct {
     id_token_signing_alg_values_supported: ?[]const []const u8 = null,
     userinfo_endpoint: ?[]const u8 = null,
     userinfo_signing_alg_values_supported: ?[]const []const u8 = null,
+    /// OpenID Connect RP-Initiated Logout 1.0 §2.1.
+    end_session_endpoint: ?[]const u8 = null,
+    /// OpenID Connect Back-Channel and Front-Channel Logout 1.0 §2.1.
+    backchannel_logout_supported: bool = false,
+    backchannel_logout_session_supported: bool = false,
+    frontchannel_logout_supported: bool = false,
+    frontchannel_logout_session_supported: bool = false,
 
     /// Whether S256 PKCE is listed. MCP's clients refuse a server that does
     /// not list it; OAuth 2.1 lets a server leave the list out.
@@ -123,7 +130,7 @@ pub fn readAuthorizationServer(gpa: std.mem.Allocator, body: []const u8, issuer:
     const m = &parsed.value;
     if (!std.mem.eql(u8, m.issuer, issuer)) return error.IssuerMismatch;
     _ = url.issuer(m.issuer) catch return error.InvalidEndpoint;
-    inline for (.{ "authorization_endpoint", "token_endpoint", "jwks_uri", "registration_endpoint", "introspection_endpoint", "device_authorization_endpoint", "revocation_endpoint", "pushed_authorization_request_endpoint", "userinfo_endpoint" }) |name| {
+    inline for (.{ "authorization_endpoint", "token_endpoint", "jwks_uri", "registration_endpoint", "introspection_endpoint", "device_authorization_endpoint", "revocation_endpoint", "pushed_authorization_request_endpoint", "userinfo_endpoint", "end_session_endpoint" }) |name| {
         if (@field(m, name)) |text| _ = url.endpoint(text) catch return error.InvalidEndpoint;
     }
     return parsed;

@@ -1,5 +1,6 @@
 //! clearance's benchmarks: JWT and JWS verification and signing per
-//! algorithm, key sets read, DPoP proofs signed and verified; and OAuth's
+//! algorithm, key sets read, DPoP proofs signed and verified, a logout token
+//! verified; and OAuth's
 //! messages: a token response read
 //! into a `TokenSet`, a device authorization read (RFC 8628), a revocation request written and answered (RFC 7009), a pushed request
 //! written and answered (RFC 9126), a UserInfo answer read, an authorization server's metadata read, an
@@ -12,7 +13,7 @@ const oauth = @import("clearance.oauth");
 const shakedown = @import("shakedown");
 const provenance = @import("preflight_bench_options");
 
-const WorkloadError = clearance.jwt.VerifyError || clearance.dpop.VerifyError || clearance.jwk.PrivateError || clearance.jwt.SignError || clearance.jwk.ParseError ||
+const WorkloadError = clearance.jwt.VerifyError || clearance.dpop.VerifyError || clearance.logout.VerifyError || clearance.jwk.PrivateError || clearance.jwt.SignError || clearance.jwk.ParseError ||
     oauth.token.ReadError || oauth.device.ReadError || oauth.revocation.ReadError || oauth.par.ReadError || oauth.userinfo.ReadError || oauth.client_auth.Error || oauth.metadata.ReadError || oauth.authorize.WriteError || error{Refused};
 const Row = shakedown.bench.Row(Bench, WorkloadError);
 
@@ -44,6 +45,10 @@ const device_authorization =
     \\"expires_in":1800,"interval":5}
 ;
 
+/// Back-Channel Logout 1.0 §2.4's example claims, with `exp`.
+const logout_claims = "{\"iss\":\"https://server.example.com\",\"sub\":\"248289761001\",\"aud\":\"s6BhdRkqt3\",\"iat\":1471566154,\"exp\":1471566274,\"jti\":\"bWJq\",\"sid\":\"08a5019c-17e1-4977-8f42-65a12843ea02\",\"events\":{\"http://schemas.openid.net/event/backchannel-logout\":{}}}";
+const logout_now: std.Io.Timestamp = .{ .nanoseconds = 1_471_566_200 * std.time.ns_per_s };
+
 /// OpenID Connect Core §5.3.2's example answer.
 const userinfo_answer =
     \\{"sub":"248289761001","name":"Jane Doe","given_name":"Jane","family_name":"Doe","preferred_username":"j.doe",
@@ -70,6 +75,7 @@ const Bench = struct {
     private: clearance.jwk.PrivateKey = undefined,
     proof: std.Io.Writer.Allocating = undefined,
     verified: clearance.dpop.Verified = undefined,
+    logout_token: std.Io.Writer.Allocating = undefined,
 
     fn setupDpop(b: *Bench) WorkloadError!void {
         b.private = try clearance.jwk.PrivateKey.parse(b.gpa, es256_private_jwk, .{});
@@ -201,6 +207,28 @@ const Bench = struct {
         }
     }
 
+    /// Back-Channel Logout §2.4's token verified (HS256: the logout checks,
+    /// not a public-key operation), with a replay set it is new to each time.
+    fn verifyLogoutToken(b: *Bench, units: u64) WorkloadError!void {
+        var replay: clearance.jwt.MemoryReplay = try .init(b.gpa, 1);
+        defer replay.deinit();
+        const keys = [_]clearance.Key{clearance.Key.hmac(&secret)};
+        for (0..units) |_| {
+            replay.entries.clearRetainingCapacity();
+            const v = try clearance.logout.verifyToken(b.io, b.logout_token.written(), &keys, .{ .algorithms = &.{.hs256}, .issuer = "https://server.example.com", .client_id = "s6BhdRkqt3", .replay = replay.replay() }, logout_now, &b.scratch);
+            b.sink +%= v.jti.len;
+        }
+    }
+
+    fn setupLogout(b: *Bench) WorkloadError!void {
+        b.logout_token = .init(b.gpa);
+        try clearance.jws.sign(b.gpa, b.io, &b.logout_token.writer, .{ .typ = clearance.logout.media_type }, logout_claims, .{ .hmac = .{ .alg = .hs256, .secret = &secret } });
+    }
+
+    fn teardownLogout(b: *Bench) WorkloadError!void {
+        b.logout_token.deinit();
+    }
+
     fn readMetadata(b: *Bench, units: u64) WorkloadError!void {
         for (0..units) |_| {
             var parsed = try oauth.metadata.readAuthorizationServer(b.gpa, metadata, "https://server.example.com", .{});
@@ -245,6 +273,7 @@ const rows = [_]Row{
     .{ .name = "jwk/parse-ed25519-set", .unit = "set", .run = Bench.parseSet },
     .{ .name = "dpop/sign-proof-es256", .unit = "proof", .run = Bench.signProof, .fixture = .{ .lifetime = .row, .setup = Bench.setupDpop, .teardown = Bench.teardownDpop } },
     .{ .name = "dpop/verify-proof-es256", .unit = "proof", .run = Bench.verifyProof, .fixture = .{ .lifetime = .row, .setup = Bench.setupDpop, .teardown = Bench.teardownDpop } },
+    .{ .name = "logout/verify-token-hs256", .unit = "token", .run = Bench.verifyLogoutToken, .fixture = .{ .lifetime = .row, .setup = Bench.setupLogout, .teardown = Bench.teardownLogout } },
     .{ .name = "oauth/read-token-response", .unit = "response", .run = Bench.readTokenResponse },
     .{ .name = "oauth/read-device-authorization", .unit = "response", .run = Bench.readDeviceAuthorization },
     .{ .name = "oauth/revocation-request", .unit = "request", .run = Bench.revokeRequest },

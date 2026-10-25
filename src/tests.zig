@@ -9,6 +9,7 @@ test {
     _ = @import("id_token.zig");
     _ = @import("access_token.zig");
     _ = @import("dpop.zig");
+    _ = @import("logout.zig");
     _ = @import("wycheproof_test.zig");
     _ = @import("property_test.zig");
 }

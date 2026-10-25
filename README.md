@@ -4,8 +4,8 @@ clearance is JWT and JOSE (JWS, JWK) and OAuth 2.1 for Zig. Two modules:
 
 - `clearance`: JSON Web Keys and key sets, JWS in the compact serialization,
   signed and verified, JWTs whose claims are checked by type before value,
-  and three profiles: OpenID Connect ID tokens, JWT access tokens (RFC 9068)
-  and DPoP proofs (RFC 9449).
+  and four profiles: OpenID Connect ID tokens, JWT access tokens (RFC 9068),
+  DPoP proofs (RFC 9449) and logout tokens (Back-Channel Logout 1.0).
   On std, [cloak](https://github.com/pedronaugusto/cloak) (signatures),
   [strand](https://github.com/pedronaugusto/strand) (JSON) and
   [aegis](https://github.com/pedronaugusto/aegis) (checked types) alone.
@@ -184,8 +184,9 @@ enterprise-managed authorization uses it, and the JWT-bearer grant (RFC 7523)
 for a workload's identity token, device authorization (RFC 8628), token
 revocation (RFC 7009), and DPoP (RFC 9449): proofs written and verified,
 tokens bound to the client's key, the servers' nonces kept, a replay set for
-a resource server's proofs, pushed authorization requests (RFC 9126), and OpenID Connect's UserInfo with
-the subject held to the ID token's. Their messages: RFC 8414 and OpenID Connect Discovery metadata, RFC 9728 protected
+a resource server's proofs, pushed authorization requests (RFC 9126), OpenID Connect's UserInfo with the
+subject held to the ID token's, and OpenID Connect logout (RP-initiated,
+back-channel logout tokens verified once, front-channel). Their messages: RFC 8414 and OpenID Connect Discovery metadata, RFC 9728 protected
 resource metadata, PKCE (S256), the authorization request with RFC 8707
 resources and its callback with RFC 9207's `iss`, the authorization code,
 refresh, client credentials, token exchange (RFC 8693) and JWT-bearer
@@ -197,7 +198,7 @@ challenges with `resource_metadata`.
 
 Not built, by decision: an authorization server; ES256K and Ed448; rich
 authorization requests (RFC 9396), JARM and CIBA; JWE's RSA1_5 and `zip`.
-Not built yet: OpenID Connect logout, the JWS JSON
+Not built yet: the JWS JSON
 serialization and unencoded payloads (RFC 7797), JWE, mTLS client
 authentication and bound tokens (RFC 8705), JAR, ES512.
 

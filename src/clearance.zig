@@ -20,6 +20,8 @@ pub const id_token = @import("id_token.zig");
 pub const access_token = @import("access_token.zig");
 /// DPoP proofs (RFC 9449): written by a client, verified by a server.
 pub const dpop = @import("dpop.zig");
+/// Logout tokens (OpenID Connect Back-Channel Logout 1.0), verified once.
+pub const logout = @import("logout.zig");
 
 test {
     if (builtin.is_test) _ = @import("tests.zig");

@@ -42,6 +42,9 @@ pub const dpop = @import("oauth/dpop.zig");
 pub const par = @import("oauth/par.zig");
 /// OpenID Connect's UserInfo: the claims read, the subject held.
 pub const userinfo = @import("oauth/userinfo.zig");
+/// OpenID Connect logout: the RP-initiated URL, the back-channel and
+/// front-channel requests read (logout tokens are `clearance.logout`'s).
+pub const logout = @import("oauth/logout.zig");
 /// Dynamic client registration (RFC 7591) and client ID metadata documents.
 pub const registration = @import("oauth/registration.zig");
 /// Token introspection (RFC 7662).
@@ -144,6 +147,7 @@ test {
     _ = dpop;
     _ = par;
     _ = userinfo;
+    _ = logout;
     _ = registration;
     _ = introspection;
     _ = challenge;
