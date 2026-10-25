@@ -184,8 +184,8 @@ enterprise-managed authorization uses it, and the JWT-bearer grant (RFC 7523)
 for a workload's identity token, device authorization (RFC 8628), token
 revocation (RFC 7009), and DPoP (RFC 9449): proofs written and verified,
 tokens bound to the client's key, the servers' nonces kept, a replay set for
-a resource server's proofs, and pushed authorization requests (RFC 9126).
-Their messages: RFC 8414 and OpenID Connect Discovery metadata, RFC 9728 protected
+a resource server's proofs, pushed authorization requests (RFC 9126), and OpenID Connect's UserInfo with
+the subject held to the ID token's. Their messages: RFC 8414 and OpenID Connect Discovery metadata, RFC 9728 protected
 resource metadata, PKCE (S256), the authorization request with RFC 8707
 resources and its callback with RFC 9207's `iss`, the authorization code,
 refresh, client credentials, token exchange (RFC 8693) and JWT-bearer
@@ -197,7 +197,7 @@ challenges with `resource_metadata`.
 
 Not built, by decision: an authorization server; ES256K and Ed448; rich
 authorization requests (RFC 9396), JARM and CIBA; JWE's RSA1_5 and `zip`.
-Not built yet: UserInfo, OpenID Connect logout, the JWS JSON
+Not built yet: OpenID Connect logout, the JWS JSON
 serialization and unencoded payloads (RFC 7797), JWE, mTLS client
 authentication and bound tokens (RFC 8705), JAR, ES512.
 

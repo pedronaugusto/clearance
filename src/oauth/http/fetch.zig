@@ -34,9 +34,19 @@ pub const Answer = struct {
     /// How long a private cache may keep it (`uplink.wire.cache.freshFor`),
     /// null when the answer says nothing.
     fresh_for: ?u32,
+    /// The media type of `Content-Type`, without its parameters (cut at 128
+    /// bytes).
+    content_type: errors.Text(128) = .{},
+    /// Every `WWW-Authenticate` line, owned: a protected resource's 401 or
+    /// 403 says why in them.
+    challenges: []const []const u8 = &.{},
+    /// The answer's `DPoP-Nonce` (RFC 9449 §9), when it has one that fits.
+    dpop_nonce: ?errors.Text(256) = null,
 
     pub fn deinit(a: *Answer, gpa: std.mem.Allocator) void {
         gpa.free(a.body);
+        for (a.challenges) |c| gpa.free(c);
+        gpa.free(a.challenges);
         a.* = undefined;
     }
 };
@@ -62,10 +72,31 @@ pub const Options = struct {
 
 /// GETs the JSON document at `target`.
 pub fn get(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, target: []const u8, limit: Bytes, options: Options) Error!Answer {
+    return getWith(gpa, io, http, target, &.{.{ .name = "Accept", .value = "application/json" }}, limit, options);
+}
+
+/// GETs the protected resource at `target` (OpenID Connect's UserInfo)
+/// presenting `authorization` (`Bearer <token>` or `DPoP <token>`), with
+/// `dpop` as its `DPoP` field when given; JSON or a JWT accepted.
+pub fn getProtected(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, target: []const u8, authorization: []const u8, dpop: ?[]const u8, limit: Bytes, options: Options) Error!Answer {
+    var headers: [3]uplink.Header = .{
+        .{ .name = "Accept", .value = "application/json, application/jwt" },
+        .{ .name = "Authorization", .value = authorization },
+        undefined,
+    };
+    var count: usize = 2;
+    if (dpop) |proof| {
+        headers[2] = .{ .name = "DPoP", .value = proof };
+        count = 3;
+    }
+    return getWith(gpa, io, http, target, headers[0..count], limit, options);
+}
+
+fn getWith(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, target: []const u8, headers: []const uplink.Header, limit: Bytes, options: Options) Error!Answer {
     _ = url.endpoint(target) catch return error.InvalidEndpoint;
     var response = try send(http, io, .{
         .url = target,
-        .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+        .headers = headers,
         .redirects = .none,
         .timeout = options.timeout,
         .diagnostics = options.diagnostics,
@@ -79,7 +110,27 @@ pub fn get(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, target: []c
         error.TlsFailed, error.ClientCertificateRejected => error.TlsFailed,
         error.ConnectionFailed, error.HttpProtocolError, error.BadContentEncoding, error.BodyIncomplete => error.ConnectionFailed,
     };
-    return .{ .status = @backingInt(response.status), .body = body, .fresh_for = uplink.wire.cache.freshFor(&response.headers) };
+    errdefer gpa.free(body);
+    var answer: Answer = .{ .status = @backingInt(response.status), .body = body, .fresh_for = uplink.wire.cache.freshFor(&response.headers) };
+    if (response.headers.get("content-type")) |t| answer.content_type = .init(std.mem.trim(u8, t[0 .. std.mem.findScalar(u8, t, ';') orelse t.len], " \t"));
+    if (response.headers.get("dpop-nonce")) |n| if (n.len <= 256) {
+        answer.dpop_nonce = .init(n);
+    };
+    var lines: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (lines.items) |l| gpa.free(l);
+        lines.deinit(gpa);
+    }
+    var it = response.headers.iterator();
+    while (it.next()) |f| if (std.ascii.eqlIgnoreCase(f.name, "www-authenticate")) {
+        const line = try gpa.dupe(u8, f.value);
+        lines.append(gpa, line) catch {
+            gpa.free(line);
+            return error.OutOfMemory;
+        };
+    };
+    answer.challenges = try lines.toOwnedSlice(gpa);
+    return answer;
 }
 
 /// POSTs `request` (a form request with the client's credentials) to

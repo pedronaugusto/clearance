@@ -40,6 +40,8 @@ pub const revocation = @import("oauth/revocation.zig");
 pub const dpop = @import("oauth/dpop.zig");
 /// Pushed authorization requests (RFC 9126).
 pub const par = @import("oauth/par.zig");
+/// OpenID Connect's UserInfo: the claims read, the subject held.
+pub const userinfo = @import("oauth/userinfo.zig");
 /// Dynamic client registration (RFC 7591) and client ID metadata documents.
 pub const registration = @import("oauth/registration.zig");
 /// Token introspection (RFC 7662).
@@ -87,6 +89,10 @@ pub const redeemIdJag = http_flow.redeemIdJag;
 pub const revoke = http_flow.revoke;
 pub const RevokeOptions = http_flow.RevokeOptions;
 pub const RevokeError = http_flow.RevokeError;
+/// The user's claims from the UserInfo endpoint, for the ID token's subject.
+pub const fetchUserInfo = http_flow.userinfo;
+pub const UserInfoOptions = http_flow.UserInfoOptions;
+pub const UserInfoError = http_flow.UserInfoError;
 /// Dynamic client registration (RFC 7591).
 pub const register = http_flow.register;
 /// The tokens a store keeps, refreshed first when they are about to expire.
@@ -137,6 +143,7 @@ test {
     _ = revocation;
     _ = dpop;
     _ = par;
+    _ = userinfo;
     _ = registration;
     _ = introspection;
     _ = challenge;

@@ -40,6 +40,8 @@ pub const AuthorizationServer = struct {
     client_id_metadata_document_supported: bool = false,
     /// OpenID Connect Discovery.
     id_token_signing_alg_values_supported: ?[]const []const u8 = null,
+    userinfo_endpoint: ?[]const u8 = null,
+    userinfo_signing_alg_values_supported: ?[]const []const u8 = null,
 
     /// Whether S256 PKCE is listed. MCP's clients refuse a server that does
     /// not list it; OAuth 2.1 lets a server leave the list out.
@@ -121,7 +123,7 @@ pub fn readAuthorizationServer(gpa: std.mem.Allocator, body: []const u8, issuer:
     const m = &parsed.value;
     if (!std.mem.eql(u8, m.issuer, issuer)) return error.IssuerMismatch;
     _ = url.issuer(m.issuer) catch return error.InvalidEndpoint;
-    inline for (.{ "authorization_endpoint", "token_endpoint", "jwks_uri", "registration_endpoint", "introspection_endpoint", "device_authorization_endpoint", "revocation_endpoint", "pushed_authorization_request_endpoint" }) |name| {
+    inline for (.{ "authorization_endpoint", "token_endpoint", "jwks_uri", "registration_endpoint", "introspection_endpoint", "device_authorization_endpoint", "revocation_endpoint", "pushed_authorization_request_endpoint", "userinfo_endpoint" }) |name| {
         if (@field(m, name)) |text| _ = url.endpoint(text) catch return error.InvalidEndpoint;
     }
     return parsed;

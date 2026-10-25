@@ -2,7 +2,7 @@
 //! algorithm, key sets read, DPoP proofs signed and verified; and OAuth's
 //! messages: a token response read
 //! into a `TokenSet`, a device authorization read (RFC 8628), a revocation request written and answered (RFC 7009), a pushed request
-//! written and answered (RFC 9126), an authorization server's metadata read, an
+//! written and answered (RFC 9126), a UserInfo answer read, an authorization server's metadata read, an
 //! authorization URL written with its PKCE verifier and state drawn. `bay bench` runs them in ReleaseFast and
 //! writes one JSON line per row to stdout; `bay test` runs each row once with
 //! `--smoke`. Timings are taken by hand, never in CI.
@@ -13,7 +13,7 @@ const shakedown = @import("shakedown");
 const provenance = @import("preflight_bench_options");
 
 const WorkloadError = clearance.jwt.VerifyError || clearance.dpop.VerifyError || clearance.jwk.PrivateError || clearance.jwt.SignError || clearance.jwk.ParseError ||
-    oauth.token.ReadError || oauth.device.ReadError || oauth.revocation.ReadError || oauth.par.ReadError || oauth.client_auth.Error || oauth.metadata.ReadError || oauth.authorize.WriteError || error{Refused};
+    oauth.token.ReadError || oauth.device.ReadError || oauth.revocation.ReadError || oauth.par.ReadError || oauth.userinfo.ReadError || oauth.client_auth.Error || oauth.metadata.ReadError || oauth.authorize.WriteError || error{Refused};
 const Row = shakedown.bench.Row(Bench, WorkloadError);
 
 const secret: [32]u8 = @splat(0x2a);
@@ -42,6 +42,12 @@ const device_authorization =
     \\{"device_code":"GmRhmhcxhwAzkoEqiMEg_DnyEysNkuNhszIySk9eS","user_code":"WDJB-MJHT",
     \\"verification_uri":"https://example.com/device","verification_uri_complete":"https://example.com/device?user_code=WDJB-MJHT",
     \\"expires_in":1800,"interval":5}
+;
+
+/// OpenID Connect Core §5.3.2's example answer.
+const userinfo_answer =
+    \\{"sub":"248289761001","name":"Jane Doe","given_name":"Jane","family_name":"Doe","preferred_username":"j.doe",
+    \\"email":"janedoe@example.com","picture":"http://example.com/janedoe/me.jpg"}
 ;
 
 /// RFC 8414 §3.2's example metadata.
@@ -183,6 +189,18 @@ const Bench = struct {
         }
     }
 
+    /// OpenID Connect Core §5.3.2's answer read as the standard claims, its
+    /// subject held to the ID token's.
+    fn readUserInfo(b: *Bench, units: u64) WorkloadError!void {
+        var arena: std.heap.ArenaAllocator = .init(b.gpa);
+        defer arena.deinit();
+        for (0..units) |_| {
+            _ = arena.reset(.retain_capacity);
+            const r = try oauth.userinfo.readResponse(oauth.userinfo.Standard, arena.allocator(), 200, "application/json", &.{}, userinfo_answer, .{ .subject = "248289761001" }, .{});
+            b.sink +%= r.claims.sub.len;
+        }
+    }
+
     fn readMetadata(b: *Bench, units: u64) WorkloadError!void {
         for (0..units) |_| {
             var parsed = try oauth.metadata.readAuthorizationServer(b.gpa, metadata, "https://server.example.com", .{});
@@ -231,6 +249,7 @@ const rows = [_]Row{
     .{ .name = "oauth/read-device-authorization", .unit = "response", .run = Bench.readDeviceAuthorization },
     .{ .name = "oauth/revocation-request", .unit = "request", .run = Bench.revokeRequest },
     .{ .name = "oauth/par-request", .unit = "request", .run = Bench.pushRequest },
+    .{ .name = "oauth/read-userinfo", .unit = "response", .run = Bench.readUserInfo },
     .{ .name = "oauth/read-metadata-rfc8414", .unit = "document", .run = Bench.readMetadata },
     .{ .name = "oauth/write-authorization-url", .unit = "url", .run = Bench.writeAuthorizationUrl },
 };

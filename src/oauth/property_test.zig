@@ -139,6 +139,29 @@ test "any bytes are read as a push's request_uri, the server's error, or refused
     try shake.check(std.testing.allocator, {}, anyPushed, .{ .cases = 1000 });
 }
 
+/// Any bytes as a UserInfo answer under any status: claims of the subject
+/// expected and no other, the resource's refusal, or refused.
+fn anyUserInfo(_: void, c: *shake.Case) !void {
+    var buffer: [512]u8 = undefined;
+    const input = shake.gen.mutated(c.source, &buffer, &.{ "{\"sub\":\"248289761001\",\"name\":\"Jane Doe\",\"email_verified\":true,\"address\":{\"country\":\"US\"},\"updated_at\":1311280970}", "{\"error\":\"insufficient_scope\"}" });
+    var arena: std.heap.ArenaAllocator = .init(c.gpa);
+    defer arena.deinit();
+    const status: u16 = if (shake.gen.boolean(c.source)) 200 else 403;
+    const challenges: []const []const u8 = if (shake.gen.boolean(c.source)) &.{"Bearer error=\"invalid_token\""} else &.{};
+    const response = oauth.userinfo.readResponse(oauth.userinfo.Standard, arena.allocator(), status, "application/json", challenges, input, .{ .subject = "248289761001" }, .{}) catch return;
+    switch (response) {
+        .claims => |claims| {
+            if (status != 200) return error.ClaimsFromAnError;
+            if (!std.mem.eql(u8, claims.sub, "248289761001")) return error.AnotherUser;
+        },
+        .refused => |e| if (status == 200 or e.name.len == 0) return error.WrongRefusal,
+    }
+}
+
+test "any bytes are read as the expected user's claims, the resource's refusal, or refused" {
+    try shake.check(std.testing.allocator, {}, anyUserInfo, .{ .cases = 1000 });
+}
+
 /// Any bytes as a registration response.
 fn anyRegistration(_: void, c: *shake.Case) !void {
     var buffer: [512]u8 = undefined;

@@ -80,6 +80,8 @@ const Provider = struct {
         defer arena_state.deinit();
         const arena = arena_state.allocator();
         const path = request.path;
+        // UserInfo writes its own media type: JSON or a JWT.
+        if (std.mem.eql(u8, path, "/userinfo")) return p.userinfo(io, arena, request, response);
         try response.header("Content-Type", "application/json");
         if (std.mem.eql(u8, path, "/.well-known/oauth-authorization-server")) {
             return response.send(io, try p.metadata(arena, p.base));
@@ -184,9 +186,9 @@ const Provider = struct {
     fn metadata(p: *Provider, arena: std.mem.Allocator, issuer: []const u8) ![]const u8 {
         return arena.print(
             \\{{"issuer":"{s}","authorization_endpoint":"{s}/authorize","token_endpoint":"{s}/token","registration_endpoint":"{s}/register",
-            \\"jwks_uri":"{s}/jwks","introspection_endpoint":"{s}/introspect","device_authorization_endpoint":"{s}/device","revocation_endpoint":"{s}/revoke","pushed_authorization_request_endpoint":"{s}/par","code_challenge_methods_supported":["S256"],
+            \\"jwks_uri":"{s}/jwks","introspection_endpoint":"{s}/introspect","device_authorization_endpoint":"{s}/device","revocation_endpoint":"{s}/revoke","pushed_authorization_request_endpoint":"{s}/par","userinfo_endpoint":"{s}/userinfo","code_challenge_methods_supported":["S256"],
             \\"grant_types_supported":["authorization_code","refresh_token","client_credentials"],"authorization_response_iss_parameter_supported":true}}
-        , .{ issuer, p.base, p.base, p.base, p.base, p.base, p.base, p.base, p.base });
+        , .{ issuer, p.base, p.base, p.base, p.base, p.base, p.base, p.base, p.base, p.base });
     }
 
     /// What a browser would do: the request read, and the redirect back
@@ -373,6 +375,38 @@ const Provider = struct {
             .cnf = .{ .jkt = jkt.written() },
         });
         return response.send(io, try arena.print("{{\"access_token\":\"{s}\",\"token_type\":\"DPoP\",\"expires_in\":600}}", .{at.written()}));
+    }
+
+    /// UserInfo: `at1` is the user `u1`, as JSON; `signed-ui` gets a signed
+    /// answer; a DPoP token `dpop-ui` needs a proof with the nonce
+    /// `ui-nonce`; any other token is refused with a challenge.
+    fn userinfo(p: *Provider, io: Io, arena: std.mem.Allocator, request: *uplink.server.Request, response: *uplink.server.Response) !void {
+        const authorization = request.headers.get("authorization") orelse "";
+        if (!std.mem.eql(u8, authorization, "Bearer signed-ui")) try response.header("Content-Type", "application/json");
+        if (std.mem.eql(u8, authorization, "Bearer at1")) return response.send(io, "{\"sub\":\"u1\",\"name\":\"Jane Doe\",\"email_verified\":true}");
+        if (std.mem.eql(u8, authorization, "Bearer signed-ui")) {
+            try response.header("Content-Type", "application/jwt");
+            var out: std.Io.Writer.Allocating = .init(arena);
+            try signTyped(arena, io, &out.writer, "k1", "JWT", .{ .iss = p.base, .aud = "app", .sub = "u1", .name = "Jane Doe" });
+            return response.send(io, out.written());
+        }
+        if (std.mem.eql(u8, authorization, "DPoP dpop-ui")) {
+            const proof = request.headers.get("dpop") orelse "";
+            const scratch = try arena.alloc(u8, clearance.jws.scratchLength(proof.len));
+            const verified = try arena.create(clearance.dpop.Verified);
+            const htu = try std.mem.concat(arena, u8, &.{ p.base, "/userinfo" });
+            if (clearance.dpop.verifyProof(io, proof, .{ .algorithms = &.{.es256}, .htm = "GET", .htu = htu, .access_token = "dpop-ui", .nonce = "ui-nonce" }, Io.Clock.real.now(io), scratch, verified)) {
+                return response.send(io, "{\"sub\":\"u1\",\"name\":\"Jane Doe\"}");
+            } else |_| {
+                response.status = .unauthorized;
+                try response.header("DPoP-Nonce", "ui-nonce");
+                try response.header("WWW-Authenticate", "DPoP error=\"use_dpop_nonce\", algs=\"ES256\"");
+                return response.send(io, "");
+            }
+        }
+        response.status = .unauthorized;
+        try response.header("WWW-Authenticate", "Bearer error=\"invalid_token\", error_description=\"expired\"");
+        return response.send(io, "");
     }
 
     fn refuse(io: Io, response: *uplink.server.Response, code: []const u8) !void {
@@ -746,6 +780,51 @@ test "DPoP: the server's nonce learned and sent again, a bound token, its proof 
     var second = try session.headers(gpa, io, "GET", target, set);
     defer second.deinit();
     _ = (try verifier.check(io, &http, arena, .{ .authorization = second.authorization.expose(), .dpop = &.{second.dpop}, .method = "GET", .url = target }, &.{})).allowed;
+}
+
+test "UserInfo: JSON for the ID token's subject, a signed answer, a DPoP token sent again with the nonce; a refusal read from the challenge" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var p: Provider = undefined;
+    try p.start(io);
+    defer p.stop(io);
+    var http: uplink.Client = .init(gpa, .{});
+    defer http.deinit(io);
+    var server = try oauth.discover(gpa, io, &http, p.base, .{});
+    defer server.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const Standard = oauth.userinfo.Standard;
+
+    var set = try oauth.TokenSet.init(gpa, .{ .access_token = "at1" });
+    defer set.deinit();
+    const jane = try oauth.fetchUserInfo(Standard, arena, io, &http, &server.value, &set, "u1", .{});
+    try testing.expectEqualStrings("Jane Doe", jane.claims.name.?);
+    try testing.expectError(error.WrongSubject, oauth.fetchUserInfo(Standard, arena, io, &http, &server.value, &set, "u2", .{}));
+
+    var keys = try clearance.jwk.KeySet.parse(gpa, "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"kid\":\"k1\",\"x\":\"" ++ ed25519_x ++ "\"}", .{});
+    defer keys.deinit();
+    var signed_set = try oauth.TokenSet.init(gpa, .{ .access_token = "signed-ui" });
+    defer signed_set.deinit();
+    const signed = try oauth.fetchUserInfo(Standard, arena, io, &http, &server.value, &signed_set, "u1", .{ .signed = .{ .keys = keys.keys, .algorithms = &.{.eddsa}, .client_id = "app" } });
+    try testing.expectEqualStrings("Jane Doe", signed.claims.name.?);
+    try testing.expectError(error.InvalidSignature, oauth.fetchUserInfo(Standard, arena, io, &http, &server.value, &signed_set, "u1", .{ .signed = .{ .keys = keys.keys, .algorithms = &.{.eddsa}, .client_id = "another" } }));
+
+    var private = try clearance.jwk.PrivateKey.parse(gpa, es256_private_jwk, .{});
+    defer private.deinit();
+    var session: oauth.dpop.Session = .init(try .fromJwk(&private, null));
+    var bound = try oauth.TokenSet.init(gpa, .{ .access_token = "dpop-ui", .token_type = .dpop });
+    defer bound.deinit();
+    try testing.expectError(error.DpopRequired, oauth.fetchUserInfo(Standard, arena, io, &http, &server.value, &bound, "u1", .{}));
+    const proved = try oauth.fetchUserInfo(Standard, arena, io, &http, &server.value, &bound, "u1", .{ .dpop = &session });
+    try testing.expectEqualStrings("Jane Doe", proved.claims.name.?);
+
+    var stale = try oauth.TokenSet.init(gpa, .{ .access_token = "old" });
+    defer stale.deinit();
+    const refused = try oauth.fetchUserInfo(Standard, arena, io, &http, &server.value, &stale, "u1", .{});
+    try testing.expectEqual(oauth.errors.Code.invalid_token, refused.refused.code);
+    try testing.expectEqualStrings("expired", refused.refused.description.slice());
 }
 
 test "registration with an initial access token" {

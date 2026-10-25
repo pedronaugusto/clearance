@@ -18,9 +18,11 @@ const id_jag = @import("../id_jag.zig");
 const device = @import("../device.zig");
 const revocation = @import("../revocation.zig");
 const par = @import("../par.zig");
+const userinfo_message = @import("../userinfo.zig");
 const store = @import("../store.zig");
 const dpop = @import("../dpop.zig");
 const errors = @import("../errors.zig");
+const challenge = @import("../challenge.zig");
 const fetch = @import("fetch.zig");
 
 const Server = metadata.AuthorizationServer;
@@ -516,6 +518,68 @@ pub fn revoke(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, server: 
     var answer = try fetch.postForm(gpa, io, http, endpoint, &request, null, options.max_bytes, options.fetch);
     defer answer.deinit();
     return revocation.readResponse(answer.status, answer.body.expose(), .{ .max_bytes = options.max_bytes });
+}
+
+pub const UserInfoOptions = struct {
+    /// Set when the client registered signed answers: the keys and
+    /// algorithms that verify them (the issuer and client come from the
+    /// call).
+    signed: ?struct { keys: []const clearance.Key, algorithms: []const clearance.Algorithm, client_id: []const u8 } = null,
+    /// The DPoP session a DPoP-bound set's token is presented with.
+    dpop: ?*dpop.Session = null,
+    max_bytes: fetch.Bytes = .literal("64KiB"),
+    fetch: fetch.Options = .{},
+};
+
+pub const UserInfoError = fetch.Error || userinfo_message.ReadError || dpop.ProofError || error{
+    /// The metadata names no UserInfo endpoint.
+    NoUserInfoEndpoint,
+    /// The set's token is DPoP-bound and the options carry no session.
+    DpopRequired,
+};
+
+/// The claims about the user `set`'s access token speaks for, from
+/// `server`'s UserInfo endpoint (OpenID Connect Core §5.3), read into
+/// `Claims` (`userinfo.Standard` for OpenID Connect's own). `subject` is the
+/// ID token's `sub`: an answer about anyone else is refused. A DPoP-bound
+/// token is presented with a proof, sent once more with the resource's
+/// nonce when it asks for one. Strings live in `arena`.
+pub fn userinfo(comptime Claims: type, arena: std.mem.Allocator, io: std.Io, http: *uplink.Client, server: *const Server, set: *const TokenSet, subject: []const u8, options: UserInfoOptions) UserInfoError!userinfo_message.Response(Claims) {
+    const endpoint = server.userinfo_endpoint orelse return error.NoUserInfoEndpoint;
+    if (set.token_type == .dpop and options.dpop == null) return error.DpopRequired;
+    var attempt: u8 = 0;
+    while (true) : (attempt += 1) {
+        var answer = switch (set.token_type) {
+            .bearer => blk: {
+                const prefix = "Bearer ";
+                var authorization = aegis.SecretBytes.init(arena, prefix.len + set.access_token.len) catch return error.OutOfMemory;
+                defer authorization.deinit();
+                // unreachable: the capacity was just allocated at this length
+                authorization.resizeWithinCapacity(prefix.len + set.access_token.len) catch unreachable;
+                @memcpy(authorization.exposeMut()[0..prefix.len], prefix);
+                @memcpy(authorization.exposeMut()[prefix.len..], set.access_token);
+                break :blk try fetch.getProtected(arena, io, http, endpoint, authorization.expose(), null, options.max_bytes, options.fetch);
+            },
+            .dpop => blk: {
+                var headers = options.dpop.?.headers(arena, io, "GET", endpoint, set) catch |err| return switch (err) {
+                    error.NotBound => unreachable, // a DPoP set
+                    else => |e| e,
+                };
+                defer headers.deinit();
+                break :blk try fetch.getProtected(arena, io, http, endpoint, headers.authorization.expose(), headers.dpop, options.max_bytes, options.fetch);
+            },
+        };
+        defer answer.deinit(arena);
+        if (options.dpop) |session| if (answer.dpop_nonce) |*n| {
+            session.remember(io, endpoint, n.slice());
+            if (attempt == 0 and answer.status == 401 and set.token_type == .dpop) {
+                const asked = challenge.readScheme(arena, answer.challenges, .dpop) catch null;
+                if (asked) |c| if (c.@"error" == .use_dpop_nonce) continue;
+            }
+        };
+        const signed: ?userinfo_message.Expected.Signed = if (options.signed) |s| .{ .keys = s.keys, .algorithms = s.algorithms, .issuer = server.issuer, .client_id = s.client_id, .now = std.Io.Clock.real.now(io) } else null;
+        return userinfo_message.readResponse(Claims, arena, answer.status, answer.content_type.slice(), answer.challenges, answer.body, .{ .subject = subject, .signed = signed }, .{ .max_bytes = options.max_bytes });
+    }
 }
 
 pub const RegisterOptions = struct {
