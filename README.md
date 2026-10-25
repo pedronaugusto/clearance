@@ -181,7 +181,10 @@ the Bearer challenge read for a step-up, the resource server's bearer check
 answers), the Identity Assertion JWT Authorization Grant
 (draft-ietf-oauth-identity-assertion-authz-grant-04) as MCP's
 enterprise-managed authorization uses it, and the JWT-bearer grant (RFC 7523)
-for a workload's identity token. Their messages: RFC 8414 and OpenID Connect Discovery metadata, RFC 9728 protected
+for a workload's identity token, device authorization (RFC 8628), token
+revocation (RFC 7009), and DPoP (RFC 9449): proofs written and verified,
+tokens bound to the client's key, the servers' nonces kept, a replay set for
+a resource server's proofs. Their messages: RFC 8414 and OpenID Connect Discovery metadata, RFC 9728 protected
 resource metadata, PKCE (S256), the authorization request with RFC 8707
 resources and its callback with RFC 9207's `iss`, the authorization code,
 refresh, client credentials, token exchange (RFC 8693) and JWT-bearer
@@ -191,10 +194,11 @@ signer, `client_secret_jwt`), RFC 7591
 registration, client ID metadata documents, RFC 7662 introspection, RFC 6750
 challenges with `resource_metadata`.
 
-Not built: JWE; ES512, ES256K and Ed448; the JWS JSON serialization; unencoded
-payloads (RFC 7797); an authorization server; device authorization, token
-revocation, DPoP, PAR and rich authorization requests (RFC 9396), until a
-user needs one.
+Not built, by decision: an authorization server; ES256K and Ed448; rich
+authorization requests (RFC 9396), JARM and CIBA; JWE's RSA1_5 and `zip`.
+Not built yet: PAR, UserInfo, OpenID Connect logout, the JWS JSON
+serialization and unencoded payloads (RFC 7797), JWE, mTLS client
+authentication and bound tokens (RFC 8705), JAR, ES512.
 
 ## Built with
 
