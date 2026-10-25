@@ -125,7 +125,7 @@ test "a key fits only its own family, curve and alg" {
     try std.testing.expect(!encrypting.fits(.es256));
 }
 
-test "an encryption key fits the JWE algorithms its kind and its alg allow" {
+test "JWE: an encryption key fits the JWE algorithms its kind and its alg allow" {
     const point: [65]u8 = @splat(4);
     var ec: Key = .{ .material = .{ .ec = .{ .curve = .p256, .point = &point } }, .use = .enc };
     try std.testing.expect(ec.fitsEncryption(.ecdh_es, .a128gcm));

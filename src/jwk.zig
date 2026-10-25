@@ -405,48 +405,7 @@ fn skip(reason: *Skip, why: Skip) error{Skipped} {
 fn read(arena: std.mem.Allocator, w: Wire, options: Reading, secrets: *Secrets, why: *Skip) ReadError!Key {
     var key: Key = .{ .material = undefined, .kid = w.kid };
     const signatures = options.purpose == .signatures;
-    // A key read for one purpose does nothing of the other's.
-    if (signatures) {
-        key.encrypt = false;
-        key.decrypt = false;
-    } else {
-        key.verify = false;
-        key.sign = false;
-    }
-    if (w.use) |use| {
-        if (std.mem.eql(u8, use, "sig")) {
-            if (!signatures) return skip(why, .not_for_encryption);
-            key.use = .sig;
-        } else if (std.mem.eql(u8, use, "enc")) {
-            if (signatures) return skip(why, .not_for_signatures);
-            key.use = .enc;
-        } else return skip(why, .invalid);
-    }
-    if (w.key_ops) |ops| {
-        var verify = false;
-        var sign = false;
-        var encrypt = false;
-        var decrypt = false;
-        for (ops) |op| {
-            if (std.mem.eql(u8, op, "verify")) verify = true;
-            if (std.mem.eql(u8, op, "sign")) sign = true;
-            if (std.mem.eql(u8, op, "encrypt") or std.mem.eql(u8, op, "wrapKey")) encrypt = true;
-            if (std.mem.eql(u8, op, "decrypt") or std.mem.eql(u8, op, "unwrapKey")) decrypt = true;
-            if (std.mem.eql(u8, op, "deriveKey") or std.mem.eql(u8, op, "deriveBits")) {
-                encrypt = true;
-                decrypt = true;
-            }
-        }
-        if (signatures) {
-            key.verify = verify;
-            key.sign = sign;
-            if (!verify and !sign) return skip(why, .not_for_signatures);
-        } else {
-            key.encrypt = encrypt;
-            key.decrypt = decrypt;
-            if (!encrypt and !decrypt) return skip(why, .not_for_encryption);
-        }
-    }
+    try readUse(w, signatures, &key, why);
     const private = w.d != null or w.p != null or w.q != null or w.dp != null or w.dq != null or w.qi != null or w.oth != null;
     if (std.mem.eql(u8, w.kty, "RSA")) {
         if (private) return skip(why, .private);
@@ -524,6 +483,52 @@ fn read(arena: std.mem.Allocator, w: Wire, options: Reading, secrets: *Secrets, 
     return key;
 }
 
+/// `use` and `key_ops` into `key` for the purpose read: a key read for one
+/// does nothing of the other's.
+fn readUse(w: Wire, signatures: bool, key: *Key, why: *Skip) error{Skipped}!void {
+    if (signatures) {
+        key.encrypt = false;
+        key.decrypt = false;
+    } else {
+        key.verify = false;
+        key.sign = false;
+    }
+    if (w.use) |use| {
+        if (std.mem.eql(u8, use, "sig")) {
+            if (!signatures) return skip(why, .not_for_encryption);
+            key.use = .sig;
+        } else if (std.mem.eql(u8, use, "enc")) {
+            if (signatures) return skip(why, .not_for_signatures);
+            key.use = .enc;
+        } else return skip(why, .invalid);
+    }
+    if (w.key_ops) |ops| {
+        var verify = false;
+        var sign = false;
+        var encrypt = false;
+        var decrypt = false;
+        for (ops) |op| {
+            if (std.mem.eql(u8, op, "verify")) verify = true;
+            if (std.mem.eql(u8, op, "sign")) sign = true;
+            if (std.mem.eql(u8, op, "encrypt") or std.mem.eql(u8, op, "wrapKey")) encrypt = true;
+            if (std.mem.eql(u8, op, "decrypt") or std.mem.eql(u8, op, "unwrapKey")) decrypt = true;
+            if (std.mem.eql(u8, op, "deriveKey") or std.mem.eql(u8, op, "deriveBits")) {
+                encrypt = true;
+                decrypt = true;
+            }
+        }
+        if (signatures) {
+            key.verify = verify;
+            key.sign = sign;
+            if (!verify and !sign) return skip(why, .not_for_signatures);
+        } else {
+            key.encrypt = encrypt;
+            key.decrypt = decrypt;
+            if (!encrypt and !decrypt) return skip(why, .not_for_encryption);
+        }
+    }
+}
+
 /// A member decoded, or null when it is missing or not base64url.
 fn decodeMember(arena: std.mem.Allocator, member: ?[]const u8) std.mem.Allocator.Error!?[]const u8 {
     const text = member orelse return null;
@@ -554,8 +559,12 @@ pub const PublicError = error{
     UnsupportedKey,
     /// Private members, or an `oct` key: not a public key.
     NotPublic,
-    /// `use` is `enc`, or `key_ops` does not allow verifying.
+    /// Read for signatures: `use` is `enc`, or `key_ops` does not allow
+    /// verifying.
     NotForSignatures,
+    /// Read for encryption: `use` is `sig`, or `key_ops` does not allow
+    /// encrypting to the key.
+    NotForEncryption,
     /// `alg` names an algorithm clearance does not have, or one the key
     /// cannot use.
     InvalidAlgorithm,
@@ -565,7 +574,7 @@ pub const PublicError = error{
 /// key whose bytes live in `arena`, through the checks a key set's keys
 /// get. A key with private members or a secret one is refused, never read
 /// as public.
-pub fn readPublic(arena: std.mem.Allocator, document: []const u8, min_rsa_bits: u16) PublicError!Key {
+pub fn readPublic(arena: std.mem.Allocator, document: []const u8, purpose: Purpose, min_rsa_bits: u16) PublicError!Key {
     const parse_options: strand.json.ParseOptions = .{ .ignore_unknown_fields = true, .limits = .{ .depth = 8 } };
     const w = strand.json.parseLeaky(Wire, arena, document, parse_options) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
@@ -573,11 +582,12 @@ pub fn readPublic(arena: std.mem.Allocator, document: []const u8, min_rsa_bits: 
     };
     var why: Skip = undefined;
     var no_secrets: Secrets = .{ .storage = &.{} };
-    const key = read(arena, w, .{ .secrets = false, .min_rsa_bits = min_rsa_bits }, &no_secrets, &why) catch |err| switch (err) {
+    const key = read(arena, w, .{ .purpose = purpose, .secrets = false, .min_rsa_bits = min_rsa_bits }, &no_secrets, &why) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Skipped => return switch (why) {
             .unsupported => error.UnsupportedKey,
             .not_for_signatures => error.NotForSignatures,
+            .not_for_encryption => error.NotForEncryption,
             .algorithm => error.InvalidAlgorithm,
             .secret, .private => error.NotPublic,
             // unreachable: one key, no set to share a kid with
@@ -585,7 +595,10 @@ pub fn readPublic(arena: std.mem.Allocator, document: []const u8, min_rsa_bits: 
             .invalid => error.InvalidKey,
         },
     };
-    if (!key.verify) return error.NotForSignatures;
+    switch (purpose) {
+        .signatures => if (!key.verify) return error.NotForSignatures,
+        .encryption => if (!key.encrypt) return error.NotForEncryption,
+    }
     return key;
 }
 

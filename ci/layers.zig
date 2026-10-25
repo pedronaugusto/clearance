@@ -6,6 +6,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "algorithms", .patterns = &.{"src/Algorithm.zig"} },
     .{ .name = "keys", .patterns = &.{ "src/Key.zig", "src/jwk.zig" } },
     .{ .name = "JWS", .patterns = &.{"src/jws.zig"} },
+    .{ .name = "JWE", .patterns = &.{"src/jwe.zig"} },
     .{ .name = "JWT", .patterns = &.{"src/jwt.zig"} },
     .{ .name = "JWT profiles", .patterns = &.{ "src/id_token.zig", "src/access_token.zig", "src/dpop.zig", "src/logout.zig" } },
     .{ .name = "public", .patterns = &.{"src/clearance.zig"} },

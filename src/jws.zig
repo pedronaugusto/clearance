@@ -134,6 +134,12 @@ pub const Check = enum {
     nonce,
     /// A token meant for one use was seen before, or the replay set is full.
     replay,
+    /// A JWE names `zip`: compressed content is refused.
+    compression,
+    /// A JWE's PBES2 count is past the caller's bound, or its salt short.
+    pbes2,
+    /// A JWE's content did not decrypt: its key, its tag or its padding.
+    decryption,
 };
 
 pub const Diagnostics = struct { check: Check = .none };

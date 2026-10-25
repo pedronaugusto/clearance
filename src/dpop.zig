@@ -206,8 +206,8 @@ fn verifyChecked(io: std.Io, proof: []const u8, expected: Expected, now: std.Io.
     if (raw_key.len > key_storage / 4) return error.InvalidKey;
     @memcpy(out.storage[0..raw_key.len], raw_key);
     var fixed: std.heap.FixedBufferAllocator = .init(out.storage[raw_key.len..]);
-    out.key = jwk.readPublic(fixed.allocator(), out.storage[0..raw_key.len], expected.min_rsa_bits) catch |err| return switch (err) {
-        error.OutOfMemory, error.UnsupportedKey, error.NotPublic, error.NotForSignatures, error.InvalidAlgorithm, error.InvalidKey => error.InvalidKey,
+    out.key = jwk.readPublic(fixed.allocator(), out.storage[0..raw_key.len], .signatures, expected.min_rsa_bits) catch |err| return switch (err) {
+        error.OutOfMemory, error.UnsupportedKey, error.NotPublic, error.NotForSignatures, error.NotForEncryption, error.InvalidAlgorithm, error.InvalidKey => error.InvalidKey,
     };
     if (out.key.material == .hmac) return error.InvalidKey;
 
