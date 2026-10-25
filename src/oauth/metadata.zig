@@ -18,6 +18,8 @@ pub const AuthorizationServer = struct {
     jwks_uri: ?[]const u8 = null,
     registration_endpoint: ?[]const u8 = null,
     introspection_endpoint: ?[]const u8 = null,
+    /// RFC 8628 §4.
+    device_authorization_endpoint: ?[]const u8 = null,
     scopes_supported: ?[]const []const u8 = null,
     response_types_supported: ?[]const []const u8 = null,
     grant_types_supported: ?[]const []const u8 = null,
@@ -113,7 +115,7 @@ pub fn readAuthorizationServer(gpa: std.mem.Allocator, body: []const u8, issuer:
     const m = &parsed.value;
     if (!std.mem.eql(u8, m.issuer, issuer)) return error.IssuerMismatch;
     _ = url.issuer(m.issuer) catch return error.InvalidEndpoint;
-    inline for (.{ "authorization_endpoint", "token_endpoint", "jwks_uri", "registration_endpoint", "introspection_endpoint" }) |name| {
+    inline for (.{ "authorization_endpoint", "token_endpoint", "jwks_uri", "registration_endpoint", "introspection_endpoint", "device_authorization_endpoint" }) |name| {
         if (@field(m, name)) |text| _ = url.endpoint(text) catch return error.InvalidEndpoint;
     }
     return parsed;

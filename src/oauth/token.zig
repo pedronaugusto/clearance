@@ -8,6 +8,7 @@ const form = @import("uplink.wire").form;
 const client_auth = @import("client_auth.zig");
 const errors = @import("errors.zig");
 const exchange = @import("exchange.zig");
+const device = @import("device.zig");
 const Scratch = @import("scratch.zig").Scratch;
 
 /// What the client asks a token for.
@@ -41,6 +42,11 @@ pub const Grant = union(enum) {
         /// server's default.
         scope: ?[]const u8 = null,
     },
+    /// A device's code, redeemed once the person has entered its user code
+    /// (RFC 8628 §3.4).
+    device_code: struct {
+        device_code: []const u8,
+    },
 
     /// The grant type it is sent as.
     pub fn typeName(g: Grant) []const u8 {
@@ -50,6 +56,7 @@ pub const Grant = union(enum) {
             .client_credentials => "client_credentials",
             .token_exchange => exchange.grant_type,
             .jwt_bearer => jwt_bearer_grant_type,
+            .device_code => device.grant_type,
         };
     }
 };
@@ -95,6 +102,7 @@ pub fn request(gpa: std.mem.Allocator, io: std.Io, client: ?client_auth.Client, 
             try pairs.append(gpa, .{ .name = "assertion", .value = g.assertion });
             if (g.scope) |scope| try pairs.append(gpa, .{ .name = "scope", .value = scope });
         },
+        .device_code => |g| try pairs.append(gpa, .{ .name = "device_code", .value = g.device_code }),
     }
     for (options.resources) |resource| try pairs.append(gpa, .{ .name = "resource", .value = resource });
     try pairs.appendSlice(gpa, options.extra);

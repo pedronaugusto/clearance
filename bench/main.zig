@@ -1,6 +1,6 @@
 //! clearance's benchmarks: JWT and JWS verification and signing per
 //! algorithm, key sets read; and OAuth's messages: a token response read
-//! into a `TokenSet`, an authorization server's metadata read, an
+//! into a `TokenSet`, a device authorization read (RFC 8628), an authorization server's metadata read, an
 //! authorization URL written with its PKCE verifier and state drawn. `bay bench` runs them in ReleaseFast and
 //! writes one JSON line per row to stdout; `bay test` runs each row once with
 //! `--smoke`. Timings are taken by hand, never in CI.
@@ -11,7 +11,7 @@ const shakedown = @import("shakedown");
 const provenance = @import("preflight_bench_options");
 
 const WorkloadError = clearance.jwt.VerifyError || clearance.jwt.SignError || clearance.jwk.ParseError ||
-    oauth.token.ReadError || oauth.metadata.ReadError || oauth.authorize.WriteError || error{Refused};
+    oauth.token.ReadError || oauth.device.ReadError || oauth.metadata.ReadError || oauth.authorize.WriteError || error{Refused};
 const Row = shakedown.bench.Row(Bench, WorkloadError);
 
 const secret: [32]u8 = @splat(0x2a);
@@ -29,6 +29,13 @@ fn repeat(comptime c: u8, comptime n: usize) *const [n]u8 {
     const bytes: [n]u8 = @splat(c);
     return &bytes;
 }
+
+/// RFC 8628 §3.2's example answer.
+const device_authorization =
+    \\{"device_code":"GmRhmhcxhwAzkoEqiMEg_DnyEysNkuNhszIySk9eS","user_code":"WDJB-MJHT",
+    \\"verification_uri":"https://example.com/device","verification_uri_complete":"https://example.com/device?user_code=WDJB-MJHT",
+    \\"expires_in":1800,"interval":5}
+;
 
 /// RFC 8414 §3.2's example metadata.
 const metadata =
@@ -95,6 +102,18 @@ const Bench = struct {
         }
     }
 
+    fn readDeviceAuthorization(b: *Bench, units: u64) WorkloadError!void {
+        for (0..units) |_| {
+            const response = try oauth.device.readAuthorization(b.gpa, 200, device_authorization, .{ .now = .{ .nanoseconds = 0 } });
+            var a = switch (response) {
+                .authorization => |a| a,
+                .refused => return error.Refused,
+            };
+            b.sink +%= a.user_code.len;
+            a.deinit();
+        }
+    }
+
     fn readMetadata(b: *Bench, units: u64) WorkloadError!void {
         for (0..units) |_| {
             var parsed = try oauth.metadata.readAuthorizationServer(b.gpa, metadata, "https://server.example.com", .{});
@@ -138,6 +157,7 @@ const rows = [_]Row{
     .{ .name = "jwt/sign-hs256", .unit = "token", .run = Bench.signHs256, .fixture = .{ .lifetime = .row, .setup = Bench.setup, .teardown = Bench.teardown } },
     .{ .name = "jwk/parse-ed25519-set", .unit = "set", .run = Bench.parseSet },
     .{ .name = "oauth/read-token-response", .unit = "response", .run = Bench.readTokenResponse },
+    .{ .name = "oauth/read-device-authorization", .unit = "response", .run = Bench.readDeviceAuthorization },
     .{ .name = "oauth/read-metadata-rfc8414", .unit = "document", .run = Bench.readMetadata },
     .{ .name = "oauth/write-authorization-url", .unit = "url", .run = Bench.writeAuthorizationUrl },
 };

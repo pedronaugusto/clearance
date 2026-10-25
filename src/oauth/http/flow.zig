@@ -15,6 +15,7 @@ const client_auth = @import("../client_auth.zig");
 const token = @import("../token.zig");
 const registration = @import("../registration.zig");
 const id_jag = @import("../id_jag.zig");
+const device = @import("../device.zig");
 const store = @import("../store.zig");
 const fetch = @import("fetch.zig");
 
@@ -270,6 +271,103 @@ pub const AuthorizationFlow = struct {
             .redirect_uri = flow.redirect_uri,
             .code_verifier = flow.pkce.verifier.expose(),
         } }, .{ .requested_scope = flow.scope }, exchange);
+    }
+};
+
+/// Device authorization (RFC 8628): `begin` asks for the codes the person
+/// is shown, `poll` makes one token request with the device code, and
+/// `wait` polls at the server's interval until the person has finished.
+pub const DeviceFlow = struct {
+    authorization: device.Authorization,
+    /// The scope asked: the granted one when the answer names none.
+    /// Borrowed from `begin`'s request.
+    scope: ?[]const u8,
+    /// RFC 8707's resources, repeated to the token endpoint. Borrowed.
+    resources: []const []const u8,
+
+    pub const Begun = union(enum) {
+        flow: DeviceFlow,
+        refused: @import("../errors.zig").ErrorResponse,
+    };
+
+    pub const BeginError = fetch.Error || client_auth.Error || device.ReadError || error{
+        /// The metadata names no device authorization endpoint.
+        NoDeviceEndpoint,
+    };
+
+    /// Asks `server` for a device's codes, for `client` (a public client
+    /// sends its id; a confidential one authenticates as at the token
+    /// endpoint).
+    pub fn begin(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, server: *const Server, client: Client, request: device.Request, options: TokenOptions) BeginError!Begun {
+        const endpoint = server.device_authorization_endpoint orelse return error.NoDeviceEndpoint;
+        const now = std.Io.Clock.real.now(io);
+        var form_request = try device.request(gpa, io, client, request, .{ .issuer = server.issuer, .now = now });
+        defer form_request.deinit();
+        var answer = try fetch.postForm(gpa, io, http, endpoint, &form_request, options.max_bytes, options.fetch);
+        defer answer.deinit();
+        return switch (try device.readAuthorization(gpa, answer.status, answer.body.expose(), .{ .now = now, .max_bytes = options.max_bytes })) {
+            .authorization => |a| .{ .flow = .{ .authorization = a, .scope = request.scope, .resources = request.resources } },
+            .refused => |e| .{ .refused = e },
+        };
+    }
+
+    pub fn deinit(flow: *DeviceFlow) void {
+        flow.authorization.deinit();
+        flow.* = undefined;
+    }
+
+    pub const Poll = union(enum) {
+        tokens: TokenSet,
+        /// The person has not finished: ask again after the interval.
+        pending,
+        /// Asked too soon: the interval has grown by five seconds (RFC 8628
+        /// §3.5), ask again after it.
+        slow_down,
+        /// Refused for good: `access_denied`, `expired_token`, or another
+        /// error.
+        refused: @import("../errors.zig").ErrorResponse,
+    };
+
+    /// One token request with the device code.
+    pub fn poll(flow: *DeviceFlow, gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, server: *const Server, client: Client, options: TokenOptions) TokenError!Poll {
+        var exchange = options;
+        if (exchange.resources.len == 0) exchange.resources = flow.resources;
+        const response = try requestToken(gpa, io, http, server, client, .{ .device_code = .{ .device_code = flow.authorization.device_code } }, .{ .requested_scope = flow.scope }, exchange);
+        return switch (response) {
+            .tokens => |t| .{ .tokens = t },
+            .refused => |e| switch (e.code) {
+                .authorization_pending => .pending,
+                .slow_down => blk: {
+                    flow.authorization.interval +|= 5;
+                    break :blk .slow_down;
+                },
+                else => .{ .refused = e },
+            },
+        };
+    }
+
+    pub const WaitError = TokenError || error{
+        /// The codes expired before the person finished: begin again.
+        Expired,
+        Canceled,
+    };
+
+    /// Polls at the interval until the person has finished: the tokens, or
+    /// the server's refusal. Each wait is `io`'s sleep, so canceling the
+    /// task ends it.
+    pub fn wait(flow: *DeviceFlow, gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, server: *const Server, client: Client, options: TokenOptions) WaitError!token.Response {
+        while (true) {
+            const now = std.Io.Clock.real.now(io);
+            const seconds: i64 = @intCast(@divFloor(now.nanoseconds, std.time.ns_per_s));
+            // A request after the codes expired would only be refused.
+            if (seconds +| @as(i64, flow.authorization.interval) >= flow.authorization.expires_at) return error.Expired;
+            try io.sleep(.fromSeconds(flow.authorization.interval), .awake);
+            switch (try flow.poll(gpa, io, http, server, client, options)) {
+                .tokens => |t| return .{ .tokens = t },
+                .refused => |e| return .{ .refused = e },
+                .pending, .slow_down => {},
+            }
+        }
     }
 };
 

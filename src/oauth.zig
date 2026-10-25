@@ -31,6 +31,8 @@ pub const exchange = @import("oauth/exchange.zig");
 /// The Identity Assertion JWT Authorization Grant: MCP's
 /// enterprise-managed authorization, the client's side.
 pub const id_jag = @import("oauth/id_jag.zig");
+/// Device authorization (RFC 8628): a device's codes asked for and read.
+pub const device = @import("oauth/device.zig");
 /// Dynamic client registration (RFC 7591) and client ID metadata documents.
 pub const registration = @import("oauth/registration.zig");
 /// Token introspection (RFC 7662).
@@ -60,6 +62,8 @@ pub const DiscoverOptions = http_discovery.Options;
 pub const DiscoverError = http_discovery.Error;
 /// The authorization code flow with PKCE, begun and finished.
 pub const AuthorizationFlow = http_flow.AuthorizationFlow;
+/// Device authorization (RFC 8628): the codes asked for, then polled.
+pub const DeviceFlow = http_flow.DeviceFlow;
 /// A grant asked of the token endpoint.
 pub const requestToken = http_flow.requestToken;
 /// New tokens for a set's refresh token.
@@ -118,6 +122,7 @@ test {
     _ = token;
     _ = exchange;
     _ = id_jag;
+    _ = device;
     _ = registration;
     _ = introspection;
     _ = challenge;

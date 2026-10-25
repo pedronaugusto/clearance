@@ -41,6 +41,11 @@ const Provider = struct {
     jwks_fetches: u32 = 0,
     introspections: u32 = 0,
     token_requests: u32 = 0,
+    /// The token endpoint's answers to a device's code, in turn; the last
+    /// repeats.
+    device_answers: []const []const u8 = &.{"{\"access_token\":\"dev-at\",\"token_type\":\"Bearer\",\"expires_in\":600}"},
+    device_polls: u32 = 0,
+    device_expires_in: u32 = 600,
 
     fn start(p: *Provider, io: Io) !void {
         p.* = .{ .gpa = testing.allocator, .http = undefined, .listener = undefined, .serving = undefined, .port = 0 };
@@ -86,6 +91,14 @@ const Provider = struct {
         if (std.mem.eql(u8, path, "/authorize")) return p.authorize(io, arena, request, response);
         if (std.mem.eql(u8, path, "/token")) return p.token(io, arena, request, response);
         if (std.mem.eql(u8, path, "/idp/token")) return p.identityProvider(io, arena, request, response);
+        if (std.mem.eql(u8, path, "/device")) {
+            const body = try request.collect(arena, io, .limited(4096));
+            if (!std.mem.eql(u8, field(arena, body, "client_id") orelse "", "tv-app")) return refuse(io, response, "invalid_client");
+            p.mutex.lockUncancelable(io);
+            const expires_in = p.device_expires_in;
+            p.mutex.unlock(io);
+            return response.send(io, try arena.print("{{\"device_code\":\"dc-1\",\"user_code\":\"WDJB-MJHT\",\"verification_uri\":\"{s}/activate\",\"expires_in\":{d},\"interval\":1}}", .{ p.base, expires_in }));
+        }
         if (std.mem.eql(u8, path, "/register")) {
             if (!std.mem.eql(u8, request.headers.get("authorization") orelse "", "Bearer initial")) {
                 response.status = .unauthorized;
@@ -127,9 +140,9 @@ const Provider = struct {
     fn metadata(p: *Provider, arena: std.mem.Allocator, issuer: []const u8) ![]const u8 {
         return arena.print(
             \\{{"issuer":"{s}","authorization_endpoint":"{s}/authorize","token_endpoint":"{s}/token","registration_endpoint":"{s}/register",
-            \\"jwks_uri":"{s}/jwks","introspection_endpoint":"{s}/introspect","code_challenge_methods_supported":["S256"],
+            \\"jwks_uri":"{s}/jwks","introspection_endpoint":"{s}/introspect","device_authorization_endpoint":"{s}/device","code_challenge_methods_supported":["S256"],
             \\"grant_types_supported":["authorization_code","refresh_token","client_credentials"],"authorization_response_iss_parameter_supported":true}}
-        , .{ issuer, p.base, p.base, p.base, p.base, p.base });
+        , .{ issuer, p.base, p.base, p.base, p.base, p.base, p.base });
     }
 
     /// What a browser would do: the request read, and the redirect back
@@ -182,6 +195,14 @@ const Provider = struct {
             return response.send(io, "{\"access_token\":\"at2\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"refresh_token\":\"rt2\"}");
         }
         if (std.mem.eql(u8, grant, "urn:ietf:params:oauth:grant-type:jwt-bearer")) return p.jwtBearer(io, arena, request, body, response);
+        if (std.mem.eql(u8, grant, "urn:ietf:params:oauth:grant-type:device_code")) {
+            if (!std.mem.eql(u8, field(arena, body, "device_code") orelse "", "dc-1") or
+                !std.mem.eql(u8, field(arena, body, "client_id") orelse "", "tv-app")) return refuse(io, response, "invalid_grant");
+            const answer = p.device_answers[@min(p.device_polls, p.device_answers.len - 1)];
+            p.device_polls += 1;
+            if (std.mem.startsWith(u8, answer, "{\"error\"")) response.status = .bad_request;
+            return response.send(io, answer);
+        }
         if (std.mem.eql(u8, grant, "client_credentials")) {
             // RFC 6749 §4.4.2's client, `s6BhdRkqt3:7Fjfp0ZBr1KtDRbnfVdmIw`.
             if (!std.mem.eql(u8, request.headers.get("authorization") orelse "", "Basic czZCaGRSa3F0Mzo3RmpmcDBaQnIxS3REUmJuZlZkbUl3")) {
@@ -410,6 +431,76 @@ test "client credentials with Basic, refused with the server's error when the se
     defer ok.tokens.deinit();
     try testing.expectEqualStrings("cc", ok.tokens.access_token);
     const refused = try oauth.clientCredentials(gpa, io, &http, &server.value, .{ .id = "s6BhdRkqt3", .credentials = .{ .client_secret_basic = "wrong" } }, null, .{});
+    try testing.expectEqual(oauth.errors.Code.invalid_client, refused.refused.code);
+}
+
+test "device authorization: the codes shown, polled through pending and slow_down, then the tokens" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var p: Provider = undefined;
+    try p.start(io);
+    defer p.stop(io);
+    var http: uplink.Client = .init(gpa, .{});
+    defer http.deinit(io);
+    var server = try oauth.discover(gpa, io, &http, p.base, .{});
+    defer server.deinit();
+    const client: oauth.Client = .{ .id = "tv-app" };
+
+    p.device_answers = &.{ "{\"error\":\"authorization_pending\"}", "{\"error\":\"slow_down\"}", "{\"access_token\":\"dev-at\",\"token_type\":\"Bearer\",\"expires_in\":600}" };
+    var begun = try oauth.DeviceFlow.begin(gpa, io, &http, &server.value, client, .{ .scope = "mcp" }, .{});
+    var flow = &begun.flow;
+    defer flow.deinit();
+    try testing.expectEqualStrings("WDJB-MJHT", flow.authorization.user_code);
+    var buffer: [128]u8 = undefined;
+    try testing.expectEqualStrings(p.url(&buffer, "/activate"), flow.authorization.verification_uri);
+    try testing.expectEqual(@as(u32, 1), flow.authorization.interval);
+    try testing.expectEqual(oauth.DeviceFlow.Poll.pending, try flow.poll(gpa, io, &http, &server.value, client, .{}));
+    try testing.expectEqual(oauth.DeviceFlow.Poll.slow_down, try flow.poll(gpa, io, &http, &server.value, client, .{}));
+    // Five seconds more, as RFC 8628 §3.5 asks.
+    try testing.expectEqual(@as(u32, 6), flow.authorization.interval);
+    var polled = try flow.poll(gpa, io, &http, &server.value, client, .{});
+    defer polled.tokens.deinit();
+    try testing.expectEqualStrings("dev-at", polled.tokens.access_token);
+    try testing.expectEqualStrings("mcp", polled.tokens.scope.?);
+
+    // `wait` sleeps the interval between requests: one pending, then tokens.
+    p.device_polls = 0;
+    p.device_answers = &.{ "{\"error\":\"authorization_pending\"}", "{\"access_token\":\"dev-at2\",\"token_type\":\"Bearer\"}" };
+    var again = try oauth.DeviceFlow.begin(gpa, io, &http, &server.value, client, .{}, .{});
+    defer again.flow.deinit();
+    const started = Io.Clock.awake.now(io);
+    var waited = try again.flow.wait(gpa, io, &http, &server.value, client, .{});
+    defer waited.tokens.deinit();
+    try testing.expectEqualStrings("dev-at2", waited.tokens.access_token);
+    try testing.expect(started.durationTo(Io.Clock.awake.now(io)).toMilliseconds() >= 2000);
+    try testing.expectEqual(@as(u32, 2), p.device_polls);
+}
+
+test "device authorization: a refusal ends the wait, and codes about to expire are not polled" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var p: Provider = undefined;
+    try p.start(io);
+    defer p.stop(io);
+    var http: uplink.Client = .init(gpa, .{});
+    defer http.deinit(io);
+    var server = try oauth.discover(gpa, io, &http, p.base, .{});
+    defer server.deinit();
+
+    p.device_answers = &.{"{\"error\":\"access_denied\"}"};
+    var denied = try oauth.DeviceFlow.begin(gpa, io, &http, &server.value, .{ .id = "tv-app" }, .{}, .{});
+    defer denied.flow.deinit();
+    const answer = try denied.flow.wait(gpa, io, &http, &server.value, .{ .id = "tv-app" }, .{});
+    try testing.expectEqual(oauth.errors.Code.access_denied, answer.refused.code);
+
+    p.device_polls = 0;
+    p.device_expires_in = 1;
+    var short = try oauth.DeviceFlow.begin(gpa, io, &http, &server.value, .{ .id = "tv-app" }, .{}, .{});
+    defer short.flow.deinit();
+    try testing.expectError(error.Expired, short.flow.wait(gpa, io, &http, &server.value, .{ .id = "tv-app" }, .{}));
+    try testing.expectEqual(@as(u32, 0), p.device_polls);
+
+    const refused = try oauth.DeviceFlow.begin(gpa, io, &http, &server.value, .{ .id = "someone" }, .{}, .{});
     try testing.expectEqual(oauth.errors.Code.invalid_client, refused.refused.code);
 }
 

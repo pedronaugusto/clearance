@@ -67,6 +67,35 @@ test "any bytes are read as a token response, the server's error, or refused" {
     try shake.check(std.testing.allocator, {}, anyTokenResponse, .{ .cases = 1000 });
 }
 
+/// Any bytes as a device authorization answer, under any status: codes a
+/// person can be shown (printable, at a URI OAuth may send them to) with an
+/// interval of at least a second, the server's error, or refused.
+fn anyDeviceAuthorization(_: void, c: *shake.Case) !void {
+    var buffer: [512]u8 = undefined;
+    const input = shake.gen.mutated(c.source, &buffer, &.{
+        "{\"device_code\":\"GmRhmhcxhwAzkoEqiMEg\",\"user_code\":\"WDJB-MJHT\",\"verification_uri\":\"https://example.com/device\",\"verification_uri_complete\":\"https://example.com/device?user_code=WDJB-MJHT\",\"expires_in\":1800,\"interval\":5}",
+        "{\"device_code\":\"d\",\"user_code\":\"GQVQ-JKEC\",\"verification_url\":\"https://www.google.com/device\",\"expires_in\":1800}",
+        "{\"error\":\"invalid_client\"}",
+    });
+    const status: u16 = if (shake.gen.boolean(c.source)) 200 else 400;
+    var response = oauth.device.readAuthorization(c.gpa, status, input, .{ .now = .{ .nanoseconds = 0 } }) catch return;
+    switch (response) {
+        .authorization => |*a| {
+            defer a.deinit();
+            if (a.device_code.len == 0 or a.user_code.len == 0 or a.user_code.len > oauth.device.max_user_code) return error.BadCode;
+            for (a.user_code) |byte| if (byte < 0x20 or byte == 0x7f) return error.ControlByte;
+            _ = try oauth.url.endpoint(a.verification_uri);
+            if (a.verification_uri_complete) |u| _ = try oauth.url.endpoint(u);
+            if (a.interval < 1 or a.expires_at < 0) return error.BadTimes;
+        },
+        .refused => |e| if (e.name.len == 0) return error.EmptyError,
+    }
+}
+
+test "any bytes are read as a device authorization, the server's error, or refused" {
+    try shake.check(std.testing.allocator, {}, anyDeviceAuthorization, .{ .cases = 1000 });
+}
+
 /// Any bytes as a registration response.
 fn anyRegistration(_: void, c: *shake.Case) !void {
     var buffer: [512]u8 = undefined;

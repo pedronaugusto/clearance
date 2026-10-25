@@ -30,6 +30,12 @@ pub const Code = enum {
     /// RFC 9470 §3: the user's authentication is not enough; a new sign-in
     /// is due. An identity provider answers a token exchange with it.
     insufficient_user_authentication,
+    /// RFC 8628 §3.5: a device's token request before the person has
+    /// finished (`authorization_pending`), too soon after the last
+    /// (`slow_down`: wait five seconds more), or after the codes expired.
+    authorization_pending,
+    slow_down,
+    expired_token,
     other,
 
     pub fn parse(name: []const u8) Code {
@@ -120,9 +126,9 @@ test "an error body is read whole, its code named or kept as written" {
     const e = readJson("{\"error\":\"invalid_grant\",\"error_description\":\"code \\\"used\\\"\",\"x\":1}", &scratch).?;
     try std.testing.expectEqual(Code.invalid_grant, e.code);
     try std.testing.expectEqualStrings("code \"used\"", e.description.slice());
-    const other = readJson("{\"error\":\"slow_down\"}", &scratch).?;
+    const other = readJson("{\"error\":\"quota_exceeded\"}", &scratch).?;
     try std.testing.expectEqual(Code.other, other.code);
-    try std.testing.expectEqualStrings("slow_down", other.name.slice());
+    try std.testing.expectEqualStrings("quota_exceeded", other.name.slice());
     try std.testing.expectEqual(@as(?ErrorResponse, null), readJson("{\"access_token\":\"x\"}", &scratch));
     try std.testing.expectEqual(@as(?ErrorResponse, null), readJson("{\"error\":\"\"}", &scratch));
     const long: [300]u8 = @splat('a');
