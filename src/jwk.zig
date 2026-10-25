@@ -1,12 +1,15 @@
 //! JSON Web Keys (RFC 7517, 7518 §6, RFC 8037): a key or a set read into
-//! `Key`s, each checked as it is read, a private key read for signing, and
-//! thumbprints (RFC 7638, RFC 9278).
+//! `Key`s, each checked as it is read, for signatures or for encryption, a
+//! private key read for signing or decrypting, and thumbprints (RFC 7638,
+//! RFC 9278).
 const std = @import("std");
 const aegis = @import("aegis");
 const strand = @import("strand");
 const cloak = @import("cloak");
 const base64url = @import("base64url.zig");
 const Algorithm = @import("Algorithm.zig").Algorithm;
+const KeyManagement = @import("Algorithm.zig").KeyManagement;
+const ContentEncryption = @import("Algorithm.zig").ContentEncryption;
 const Key = @import("Key.zig");
 
 /// Sizes in options: `.literal("16KiB")`.
@@ -41,13 +44,29 @@ const Wire = struct {
     oth: ?strand.json.Raw = null,
 };
 
+/// What keys are read for. A key is read for one: a JWK's `use` and
+/// `key_ops` name signatures or encryption (RFC 7517 §4.2-4.3), and a key
+/// read for one is never used for the other.
+pub const Purpose = enum {
+    /// JWS: verifying or signing. RSA, EC, Ed25519 and HMAC keys.
+    signatures,
+    /// JWE: encrypting to the key or decrypting with it. RSA and EC keys,
+    /// X25519 keys, and AES or content keys (`oct`).
+    encryption,
+};
+
 /// Why a key was left out of a set.
 pub const Skip = enum {
-    /// `kty` or `crv` names a kind clearance does not verify with (X25519,
-    /// P-521, secp256k1, Ed448, AKP...).
+    /// `kty` or `crv` names a kind clearance does not use for the purpose
+    /// (for signatures X25519, for encryption Ed25519; P-521, secp256k1,
+    /// Ed448, AKP...).
     unsupported,
-    /// `use` is `enc`, or `key_ops` allows neither signing nor verifying.
+    /// Read for signatures: `use` is `enc`, or `key_ops` allows neither
+    /// signing nor verifying.
     not_for_signatures,
+    /// Read for encryption: `use` is `sig`, or `key_ops` allows neither
+    /// encrypting nor decrypting.
+    not_for_encryption,
     /// `alg` names an algorithm clearance does not have, or one the key's
     /// kind cannot use.
     algorithm,
@@ -64,6 +83,7 @@ pub const Skip = enum {
 };
 
 pub const Options = struct {
+    purpose: Purpose = .signatures,
     /// Whether `oct` (HMAC) keys are taken. Off for a set fetched from a
     /// server: a published key set holds public keys.
     secrets: bool = false,
@@ -76,7 +96,7 @@ pub const Options = struct {
     min_rsa_bits: u16 = 2048,
 
     fn read(options: Options) Reading {
-        return .{ .secrets = options.secrets, .min_rsa_bits = options.min_rsa_bits };
+        return .{ .purpose = options.purpose, .secrets = options.secrets, .min_rsa_bits = options.min_rsa_bits };
     }
 };
 
@@ -196,6 +216,8 @@ pub const KeySet = struct {
 
 /// How `PrivateKey.parse` reads.
 pub const PrivateOptions = struct {
+    /// Signing (JWS), or decrypting (JWE: RSA, EC and X25519 keys).
+    purpose: Purpose = .signatures,
     /// The largest document read.
     max_bytes: Bytes = .literal("64KiB"),
     /// RSA moduli shorter than this are refused (and any shorter than
@@ -214,8 +236,12 @@ pub const PrivateError = error{
     UnsupportedKey,
     /// A public key: no private member.
     NotPrivate,
-    /// `use` is `enc`, or `key_ops` does not allow signing.
+    /// Read for signing: `use` is `enc`, or `key_ops` does not allow
+    /// signing.
     NotForSigning,
+    /// Read for decrypting: `use` is `sig`, or `key_ops` does not allow
+    /// decrypting.
+    NotForDecryption,
     /// `alg` names an algorithm clearance does not have, or one the key
     /// cannot sign with.
     InvalidAlgorithm,
@@ -227,7 +253,8 @@ pub const PrivateError = error{
 
 /// A private JWK read for signing (RFC 7518 §6.2.2, §6.3.2, RFC 8037 §2): an
 /// EC key on P-256 or P-384, an Ed25519 key, or a two-prime RSA key with its
-/// CRT members. `jws.Signer.fromJwk` signs with it.
+/// CRT members; `jws.Signer.fromJwk` signs with it. Or read for decrypting:
+/// an RSA, EC or X25519 key (RFC 8037 §3.2), which `jwe.Key.fromJwk` holds.
 pub const PrivateKey = struct {
     /// The key, as cloak holds it: wiped when its last owner releases it.
     key: cloak.PrivateKey,
@@ -267,18 +294,22 @@ pub const PrivateKey = struct {
         public_wire.qi = null;
         var why: Skip = undefined;
         var no_secrets: Secrets = .{ .storage = &.{} };
-        var public = read(arena.allocator(), public_wire, .{ .secrets = false, .min_rsa_bits = options.min_rsa_bits }, &no_secrets, &why) catch |err| switch (err) {
+        var public = read(arena.allocator(), public_wire, .{ .purpose = options.purpose, .secrets = false, .min_rsa_bits = options.min_rsa_bits }, &no_secrets, &why) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Skipped => return switch (why) {
                 .unsupported => error.UnsupportedKey,
                 .not_for_signatures => error.NotForSigning,
+                .not_for_encryption => error.NotForDecryption,
                 .algorithm => error.InvalidAlgorithm,
                 // unreachable: no set, no secret, no private member
                 .secret, .private, .duplicate => unreachable,
                 .invalid => error.InvalidKey,
             },
         };
-        if (!public.sign) return error.NotForSigning;
+        switch (options.purpose) {
+            .signatures => if (!public.sign) return error.NotForSigning,
+            .encryption => if (!public.decrypt) return error.NotForDecryption,
+        }
         // The kid borrowed the document, which is wiped on return.
         if (public.kid) |kid| public.kid = try arena.allocator().dupe(u8, kid);
 
@@ -301,7 +332,10 @@ pub const PrivateKey = struct {
                 .p256 => .p256,
                 .p384 => .p384,
             }, .d = private_scalar, .public = ec.point } },
-            .okp => |okp| .{ .ed25519 = .{ .seed = private_scalar, .public = okp.x } },
+            .okp => |okp| switch (okp.curve) {
+                .ed25519 => .{ .ed25519 = .{ .seed = private_scalar, .public = okp.x } },
+                .x25519 => .{ .x25519 = .{ .d = private_scalar, .public = okp.x } },
+            },
             .rsa => |rsa| blk: {
                 var members: [5][]const u8 = undefined;
                 for (rsa_members, &members) |member, *out| out.* = decodeInto(storage, &used, rawText(member.?).?) orelse return error.InvalidKey;
@@ -356,7 +390,7 @@ fn duplicated(wires: []const Wire, i: usize) bool {
 const ReadError = error{Skipped} || std.mem.Allocator.Error;
 
 /// What `read` takes from a set's or a private key's options.
-const Reading = struct { secrets: bool, min_rsa_bits: u16 };
+const Reading = struct { purpose: Purpose, secrets: bool, min_rsa_bits: u16 };
 
 /// Where `oct` keys' bytes are decoded: the set's wiped storage.
 const Secrets = struct { storage: []u8, used: usize = 0 };
@@ -370,17 +404,48 @@ fn skip(reason: *Skip, why: Skip) error{Skipped} {
 /// `error.Skipped` with the reason in `why`.
 fn read(arena: std.mem.Allocator, w: Wire, options: Reading, secrets: *Secrets, why: *Skip) ReadError!Key {
     var key: Key = .{ .material = undefined, .kid = w.kid };
-    if (w.use) |use| {
-        if (std.mem.eql(u8, use, "sig")) key.use = .sig else if (std.mem.eql(u8, use, "enc")) return skip(why, .not_for_signatures) else return skip(why, .invalid);
-    }
-    if (w.key_ops) |ops| {
+    const signatures = options.purpose == .signatures;
+    // A key read for one purpose does nothing of the other's.
+    if (signatures) {
+        key.encrypt = false;
+        key.decrypt = false;
+    } else {
         key.verify = false;
         key.sign = false;
+    }
+    if (w.use) |use| {
+        if (std.mem.eql(u8, use, "sig")) {
+            if (!signatures) return skip(why, .not_for_encryption);
+            key.use = .sig;
+        } else if (std.mem.eql(u8, use, "enc")) {
+            if (signatures) return skip(why, .not_for_signatures);
+            key.use = .enc;
+        } else return skip(why, .invalid);
+    }
+    if (w.key_ops) |ops| {
+        var verify = false;
+        var sign = false;
+        var encrypt = false;
+        var decrypt = false;
         for (ops) |op| {
-            if (std.mem.eql(u8, op, "verify")) key.verify = true;
-            if (std.mem.eql(u8, op, "sign")) key.sign = true;
+            if (std.mem.eql(u8, op, "verify")) verify = true;
+            if (std.mem.eql(u8, op, "sign")) sign = true;
+            if (std.mem.eql(u8, op, "encrypt") or std.mem.eql(u8, op, "wrapKey")) encrypt = true;
+            if (std.mem.eql(u8, op, "decrypt") or std.mem.eql(u8, op, "unwrapKey")) decrypt = true;
+            if (std.mem.eql(u8, op, "deriveKey") or std.mem.eql(u8, op, "deriveBits")) {
+                encrypt = true;
+                decrypt = true;
+            }
         }
-        if (!key.verify and !key.sign) return skip(why, .not_for_signatures);
+        if (signatures) {
+            key.verify = verify;
+            key.sign = sign;
+            if (!verify and !sign) return skip(why, .not_for_signatures);
+        } else {
+            key.encrypt = encrypt;
+            key.decrypt = decrypt;
+            if (!encrypt and !decrypt) return skip(why, .not_for_encryption);
+        }
     }
     const private = w.d != null or w.p != null or w.q != null or w.dp != null or w.dq != null or w.qi != null or w.oth != null;
     if (std.mem.eql(u8, w.kty, "RSA")) {
@@ -415,11 +480,13 @@ fn read(arena: std.mem.Allocator, w: Wire, options: Reading, secrets: *Secrets, 
     } else if (std.mem.eql(u8, w.kty, "OKP")) {
         if (private) return skip(why, .private);
         const crv = w.crv orelse return skip(why, .invalid);
-        if (!std.mem.eql(u8, crv, "Ed25519")) return skip(why, .unsupported);
+        const curve: Key.OkpCurve = if (signatures and std.mem.eql(u8, crv, "Ed25519")) .ed25519 else if (!signatures and std.mem.eql(u8, crv, "X25519")) .x25519 else return skip(why, .unsupported);
         const x = try decodeMember(arena, w.x) orelse return skip(why, .invalid);
         if (x.len != 32) return skip(why, .invalid);
-        _ = std.crypto.sign.Ed25519.PublicKey.fromBytes(x[0..32].*) catch return skip(why, .invalid);
-        key.material = .{ .okp = .{ .x = x } };
+        // Every 32 bytes are an X25519 key (RFC 7748 §5); an agreement
+        // refuses the ones of small order.
+        if (curve == .ed25519) _ = std.crypto.sign.Ed25519.PublicKey.fromBytes(x[0..32].*) catch return skip(why, .invalid);
+        key.material = .{ .okp = .{ .curve = curve, .x = x } };
     } else if (std.mem.eql(u8, w.kty, "oct")) {
         if (!options.secrets) return skip(why, .secret);
         const k = rawText(w.k orelse return skip(why, .invalid)) orelse return skip(why, .invalid);
@@ -432,10 +499,27 @@ fn read(arena: std.mem.Allocator, w: Wire, options: Reading, secrets: *Secrets, 
         key.material = .{ .hmac = secret };
     } else return skip(why, .unsupported);
     if (w.alg) |name| {
-        const alg = Algorithm.parse(name) orelse return skip(why, .algorithm);
-        if (alg.family() != std.meta.activeTag(key.material)) return skip(why, .algorithm);
-        if (alg.curve()) |c| if (key.material.ec.curve != c) return skip(why, .algorithm);
-        key.alg = alg;
+        if (signatures) {
+            const alg = Algorithm.parse(name) orelse return skip(why, .algorithm);
+            if (alg.family() != std.meta.activeTag(key.material)) return skip(why, .algorithm);
+            if (alg.curve()) |c| if (key.material.ec.curve != c) return skip(why, .algorithm);
+            key.alg = alg;
+        } else if (KeyManagement.parse(name)) |alg| {
+            const fits = switch (alg.kind()) {
+                .rsa => key.material == .rsa,
+                .agreement => key.material == .ec or key.material == .okp,
+                .wrap, .gcm_wrap => key.material == .hmac and key.material.hmac.len == alg.wrapLength().?,
+                // `dir` with no content named: any content key's length.
+                .direct => key.material == .hmac,
+                .password => false,
+            };
+            if (!fits) return skip(why, .algorithm);
+            key.management = alg;
+        } else if (ContentEncryption.parse(name)) |enc| {
+            // A content key itself (`dir`), of that content's length.
+            if (key.material != .hmac or key.material.hmac.len != enc.keyLength()) return skip(why, .algorithm);
+            key.content = enc;
+        } else return skip(why, .algorithm);
     }
     return key;
 }
@@ -543,7 +627,7 @@ fn writeRequired(w: *std.Io.Writer, key: Key) std.Io.Writer.Error!void {
             try w.writeAll("\"}");
         },
         .okp => |okp| {
-            try w.writeAll("{\"crv\":\"Ed25519\",\"kty\":\"OKP\",\"x\":\"");
+            try w.writeAll(if (okp.curve == .ed25519) "{\"crv\":\"Ed25519\",\"kty\":\"OKP\",\"x\":\"" else "{\"crv\":\"X25519\",\"kty\":\"OKP\",\"x\":\"");
             try base64url.encode(w, okp.x);
             try w.writeAll("\"}");
         },

@@ -24,12 +24,11 @@
             .hash = "strand-0.11.1-8LNWVtZJJgDujColV9BwoK1duuRMWp4bfuV2Gc2iLTEI",
         },
         .cloak = .{
-            .url = "git+https://github.com/pedronaugusto/cloak?ref=v0.19.0#f6a7f419a3710337379b8242a4f5ee79eae58ceb",
-            .hash = "cloak-0.19.0-9onwccHjugMLhhdGp_FNBvJJqhc_1yxkDTStfA03RPoO",
+            .url = "git+https://github.com/pedronaugusto/cloak#c1094e598300742cd952f9efb4ed8cf8ed0a1e46",
+            .hash = "cloak-0.22.1-9onwcVaz7AOrF5TAGgkJfNmTGFmkJgcnLAPsA0btisRF",
         },
         .uplink = .{
-            .url = "git+https://github.com/pedronaugusto/uplink?ref=v0.8.7#d225d809c81f03bceed13f2a3c701d323238ecba",
-            .hash = "uplink-0.8.7-0eVSJkcWFgAnxHgRJ1doYRx0XDWlfg6t8lKlMESTd9V9",
+            .path = "../uplink-dev",
             .lazy = true,
         },
     },
