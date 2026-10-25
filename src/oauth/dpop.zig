@@ -85,8 +85,9 @@ pub const Session = struct {
         }, std.Io.Clock.real.now(io)) catch |err| return switch (err) {
             error.OutOfMemory, error.WriteFailed => error.OutOfMemory,
             error.InvalidKey => error.InvalidKey,
-            // A proof's claims are strings and a number: they always write.
-            error.SigningFailed, error.InvalidClaims => error.SigningFailed,
+            // A proof's claims are strings and a number, its header clearance's
+            // own and its payload encoded: they always write.
+            error.SigningFailed, error.InvalidClaims, error.InvalidHeader, error.InvalidPayload => error.SigningFailed,
         };
     }
 

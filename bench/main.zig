@@ -1,5 +1,5 @@
 //! clearance's benchmarks: JWT and JWS verification and signing per
-//! algorithm, key sets read, DPoP proofs signed and verified, a logout token
+//! algorithm, key sets read, flattened JWS JSON verified and signed, DPoP proofs signed and verified, a logout token
 //! verified; and OAuth's
 //! messages: a token response read
 //! into a `TokenSet`, a device authorization read (RFC 8628), a revocation request written and answered (RFC 7009), a pushed request
@@ -45,6 +45,9 @@ const device_authorization =
     \\"expires_in":1800,"interval":5}
 ;
 
+/// The payload of the JSON rows: the claims the JWT rows sign.
+const flattened_payload = "{\"exp\":4000000000,\"sub\":\"user-1\",\"scope\":\"read write\"}";
+
 /// Back-Channel Logout 1.0 §2.4's example claims, with `exp`.
 const logout_claims = "{\"iss\":\"https://server.example.com\",\"sub\":\"248289761001\",\"aud\":\"s6BhdRkqt3\",\"iat\":1471566154,\"exp\":1471566274,\"jti\":\"bWJq\",\"sid\":\"08a5019c-17e1-4977-8f42-65a12843ea02\",\"events\":{\"http://schemas.openid.net/event/backchannel-logout\":{}}}";
 const logout_now: std.Io.Timestamp = .{ .nanoseconds = 1_471_566_200 * std.time.ns_per_s };
@@ -76,6 +79,7 @@ const Bench = struct {
     proof: std.Io.Writer.Allocating = undefined,
     verified: clearance.dpop.Verified = undefined,
     logout_token: std.Io.Writer.Allocating = undefined,
+    json_scratch: []u8 = &.{},
 
     fn setupDpop(b: *Bench) WorkloadError!void {
         b.private = try clearance.jwk.PrivateKey.parse(b.gpa, es256_private_jwk, .{});
@@ -220,6 +224,36 @@ const Bench = struct {
         }
     }
 
+    /// A flattened JWS (RFC 7515 §7.2.2) of the bench's claims, HS256.
+    fn setupFlattened(b: *Bench) WorkloadError!void {
+        b.token = .init(b.gpa);
+        try clearance.jws.signJson(b.gpa, b.io, &b.token.writer, .flattened, flattened_payload, &.{.{ .signer = .{ .hmac = .{ .alg = .hs256, .secret = &secret } }, .header = .{ .kid = "hs" } }}, .{});
+        b.json_scratch = try b.gpa.alloc(u8, clearance.jws.scratchLengthJson(b.token.written().len, 0));
+    }
+
+    fn teardownFlattened(b: *Bench) WorkloadError!void {
+        b.gpa.free(b.json_scratch);
+        b.token.deinit();
+    }
+
+    fn verifyFlattened(b: *Bench, units: u64) WorkloadError!void {
+        const keys = [_]clearance.Key{.{ .material = .{ .hmac = &secret }, .kid = "hs" }};
+        for (0..units) |_| {
+            const v = try clearance.jws.verifyJson(b.token.written(), &keys, .{ .algorithms = &.{.hs256} }, b.json_scratch);
+            b.sink +%= v.payload.len;
+        }
+    }
+
+    fn signFlattened(b: *Bench, units: u64) WorkloadError!void {
+        var out: std.Io.Writer.Allocating = .init(b.gpa);
+        defer out.deinit();
+        for (0..units) |_| {
+            out.clearRetainingCapacity();
+            try clearance.jws.signJson(b.gpa, b.io, &out.writer, .flattened, flattened_payload, &.{.{ .signer = .{ .hmac = .{ .alg = .hs256, .secret = &secret } }, .header = .{ .kid = "hs" } }}, .{});
+            b.sink +%= out.written().len;
+        }
+    }
+
     fn setupLogout(b: *Bench) WorkloadError!void {
         b.logout_token = .init(b.gpa);
         try clearance.jws.sign(b.gpa, b.io, &b.logout_token.writer, .{ .typ = clearance.logout.media_type }, logout_claims, .{ .hmac = .{ .alg = .hs256, .secret = &secret } });
@@ -273,6 +307,8 @@ const rows = [_]Row{
     .{ .name = "jwk/parse-ed25519-set", .unit = "set", .run = Bench.parseSet },
     .{ .name = "dpop/sign-proof-es256", .unit = "proof", .run = Bench.signProof, .fixture = .{ .lifetime = .row, .setup = Bench.setupDpop, .teardown = Bench.teardownDpop } },
     .{ .name = "dpop/verify-proof-es256", .unit = "proof", .run = Bench.verifyProof, .fixture = .{ .lifetime = .row, .setup = Bench.setupDpop, .teardown = Bench.teardownDpop } },
+    .{ .name = "jws/verify-flattened-hs256", .unit = "document", .run = Bench.verifyFlattened, .fixture = .{ .lifetime = .row, .setup = Bench.setupFlattened, .teardown = Bench.teardownFlattened } },
+    .{ .name = "jws/sign-flattened-hs256", .unit = "document", .run = Bench.signFlattened },
     .{ .name = "logout/verify-token-hs256", .unit = "token", .run = Bench.verifyLogoutToken, .fixture = .{ .lifetime = .row, .setup = Bench.setupLogout, .teardown = Bench.teardownLogout } },
     .{ .name = "oauth/read-token-response", .unit = "response", .run = Bench.readTokenResponse },
     .{ .name = "oauth/read-device-authorization", .unit = "response", .run = Bench.readDeviceAuthorization },

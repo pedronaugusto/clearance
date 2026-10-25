@@ -183,7 +183,8 @@ fn signAssertion(gpa: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, id: []
     }, p.signer) catch |err| return switch (err) {
         error.OutOfMemory, error.WriteFailed => error.OutOfMemory,
         error.InvalidKey => error.InvalidKey,
-        error.SigningFailed, error.InvalidClaims => error.SigningFailed,
+        // No extra header member, and an encoded payload: neither refusal can happen.
+        error.SigningFailed, error.InvalidClaims, error.InvalidHeader, error.InvalidPayload => error.SigningFailed,
     };
 }
 

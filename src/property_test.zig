@@ -190,3 +190,34 @@ test "any bytes are a logout token for this client, naming a user or a session, 
     try jws.sign(gpa, std.testing.io, &out.writer, .{ .typ = logout.media_type }, "{\"iss\":\"https://server.example.com\",\"sub\":\"248289761001\",\"aud\":\"s6BhdRkqt3\",\"iat\":1471566154,\"exp\":1471566274,\"jti\":\"bWJq\",\"sid\":\"08a5019c\",\"events\":{\"http://schemas.openid.net/event/backchannel-logout\":{}}}", .{ .hmac = .{ .alg = .hs256, .secret = &secret } });
     try shake.check(gpa, @as([]const u8, out.written()), anyLogoutToken, .{ .cases = 1000 });
 }
+
+/// Seeds for the JSON serializations: a flattened and a general document.
+const JsonCase = struct { flattened: []const u8, general: []const u8, secret: []const u8 };
+
+/// Any bytes as a JWS JSON document: refused, or verified by a signature of
+/// the document's whose algorithm the key fits, the payload inside the
+/// scratch or the document.
+fn anyJsonDocument(case: JsonCase, c: *shake.Case) !void {
+    var buffer: [1024]u8 = undefined;
+    const input = shake.gen.mutated(c.source, &buffer, &.{ case.flattened, case.general });
+    var scratch: [jws.scratchLengthJson(1024, 0)]u8 = undefined;
+    const keys = [_]Key{Key.hmac(case.secret)};
+    const verified = jws.verifyJson(input, &keys, .{ .algorithms = all, .unencoded = shake.gen.boolean(c.source) }, &scratch) catch return;
+    if (!verified.key.fits(verified.header.alg)) return error.KeyDoesNotFit;
+    if (verified.index >= 16) return error.IndexOutOfRange;
+}
+
+test "any bytes are a JWS JSON document verified by one of its signatures, or refused" {
+    const gpa = std.testing.allocator;
+    const secret: [32]u8 = @splat(0x33);
+    var flattened: std.Io.Writer.Allocating = .init(gpa);
+    defer flattened.deinit();
+    try jws.signJson(gpa, std.testing.io, &flattened.writer, .flattened, "payload", &.{.{ .signer = .{ .hmac = .{ .alg = .hs256, .secret = &secret } }, .header = .{ .kid = "k" } }}, .{});
+    var general: std.Io.Writer.Allocating = .init(gpa);
+    defer general.deinit();
+    try jws.signJson(gpa, std.testing.io, &general.writer, .general, "$.02", &.{
+        .{ .signer = .{ .hmac = .{ .alg = .hs512, .secret = &(@as([64]u8, @splat(1))) } }, .header = .{ .b64 = false } },
+        .{ .signer = .{ .hmac = .{ .alg = .hs256, .secret = &secret } }, .header = .{ .b64 = false }, .unprotected = "{\"kid\":\"k\"}" },
+    }, .{});
+    try shake.check(gpa, JsonCase{ .flattened = flattened.written(), .general = general.written(), .secret = &secret }, anyJsonDocument, .{ .cases = 2000 });
+}

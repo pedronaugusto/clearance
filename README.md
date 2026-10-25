@@ -2,8 +2,8 @@
 
 clearance is JWT and JOSE (JWS, JWK) and OAuth 2.1 for Zig. Two modules:
 
-- `clearance`: JSON Web Keys and key sets, JWS in the compact serialization,
-  signed and verified, JWTs whose claims are checked by type before value,
+- `clearance`: JSON Web Keys and key sets, JWS in the compact and JSON
+  serializations (unencoded and detached payloads too), signed and verified, JWTs whose claims are checked by type before value,
   and four profiles: OpenID Connect ID tokens, JWT access tokens (RFC 9068),
   DPoP proofs (RFC 9449) and logout tokens (Back-Channel Logout 1.0).
   On std, [cloak](https://github.com/pedronaugusto/cloak) (signatures),
@@ -198,8 +198,7 @@ challenges with `resource_metadata`.
 
 Not built, by decision: an authorization server; ES256K and Ed448; rich
 authorization requests (RFC 9396), JARM and CIBA; JWE's RSA1_5 and `zip`.
-Not built yet: the JWS JSON
-serialization and unencoded payloads (RFC 7797), JWE, mTLS client
+Not built yet: JWE, mTLS client
 authentication and bound tokens (RFC 8705), JAR, ES512.
 
 ## Built with
