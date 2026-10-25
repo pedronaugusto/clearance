@@ -66,6 +66,7 @@ pub const DecryptionKey = struct {
             .ec => |ec| switch (ec.curve) {
                 .p256 => .p256,
                 .p384 => .p384,
+                .p521 => return error.InvalidKey,
             },
             .okp => |okp| if (okp.curve == .x25519) .x25519 else return error.InvalidKey,
             .hmac => return error.InvalidKey,

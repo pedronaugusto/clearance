@@ -328,10 +328,18 @@ pub const PrivateKey = struct {
         var used: usize = 0;
         const private_scalar = decodeInto(storage, &used, d) orelse return error.InvalidKey;
         const components: cloak.PrivateKey.Components = switch (public.material) {
-            .ec => |ec| .{ .ec = .{ .curve = switch (ec.curve) {
-                .p256 => .p256,
-                .p384 => .p384,
-            }, .d = private_scalar, .public = ec.point } },
+            .ec => |ec| .{
+                .ec = .{
+                    .curve = switch (ec.curve) {
+                        .p256 => .p256,
+                        .p384 => .p384,
+                        // unreachable: `read` takes no `crv` but P-256 and P-384
+                        .p521 => unreachable,
+                    },
+                    .d = private_scalar,
+                    .public = ec.point,
+                },
+            },
             .okp => |okp| switch (okp.curve) {
                 .ed25519 => .{ .ed25519 = .{ .seed = private_scalar, .public = okp.x } },
                 .x25519 => .{ .x25519 = .{ .d = private_scalar, .public = okp.x } },
@@ -433,6 +441,8 @@ fn read(arena: std.mem.Allocator, w: Wire, options: Reading, secrets: *Secrets, 
         const valid = switch (curve) {
             .p256 => if (std.crypto.sign.ecdsa.EcdsaP256Sha256.PublicKey.fromSec1(point)) |_| true else |_| false,
             .p384 => if (std.crypto.sign.ecdsa.EcdsaP384Sha384.PublicKey.fromSec1(point)) |_| true else |_| false,
+            // unreachable: the `crv` read above is P-256 or P-384
+            .p521 => unreachable,
         };
         if (!valid) return skip(why, .invalid);
         key.material = .{ .ec = .{ .curve = curve, .point = point } };

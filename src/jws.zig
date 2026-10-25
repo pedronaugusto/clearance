@@ -653,6 +653,7 @@ pub const Signer = union(enum) {
             .ec => |ec| switch (ec.curve) {
                 .p256 => Algorithm.es256,
                 .p384 => Algorithm.es384,
+                .p521 => return error.InvalidKey,
             },
             .okp => Algorithm.eddsa,
             .rsa, .hmac => return error.InvalidKey,

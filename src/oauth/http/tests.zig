@@ -1135,12 +1135,12 @@ test "an ID token from the code flow: the flow's nonce and the access token's ha
     var keys = try clearance.jwk.KeySet.parse(testing.allocator, "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"kid\":\"k1\",\"x\":\"" ++ ed25519_x ++ "\"}", .{});
     defer keys.deinit();
     var scratch: [2048]u8 = undefined;
-    const verified = try flow.verifyIdToken(void, &set, &server, "app", keys.keys, &.{.eddsa}, Io.Clock.real.now(io), &scratch);
+    const verified = try flow.verifyIdToken(void, &set, &server, "app", keys.keys, &.{.eddsa}, null, Io.Clock.real.now(io), &scratch);
     try testing.expectEqualStrings("u1", verified.registered.sub.?);
     // Another access token beside it fails its hash.
     var other = try oauth.TokenSet.init(testing.allocator, .{ .access_token = "other", .id_token = id.written() });
     defer other.deinit();
-    try testing.expectError(error.WrongAccessTokenHash, flow.verifyIdToken(void, &other, &server, "app", keys.keys, &.{.eddsa}, Io.Clock.real.now(io), &scratch));
+    try testing.expectError(error.WrongAccessTokenHash, flow.verifyIdToken(void, &other, &server, "app", keys.keys, &.{.eddsa}, null, Io.Clock.real.now(io), &scratch));
 }
 
 test "enterprise-managed authorization: the user's ID token exchanged for an ID-JAG, redeemed for an access token" {

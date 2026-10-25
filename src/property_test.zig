@@ -5,6 +5,7 @@ const shake = @import("shakedown");
 const jws = @import("jws.zig");
 const jwt = @import("jwt.zig");
 const jwk = @import("jwk.zig");
+const jwe = @import("jwe.zig");
 const Key = @import("Key.zig");
 const Algorithm = @import("Algorithm.zig").Algorithm;
 
@@ -220,4 +221,97 @@ test "any bytes are a JWS JSON document verified by one of its signatures, or re
         .{ .signer = .{ .hmac = .{ .alg = .hs256, .secret = &secret } }, .header = .{ .b64 = false }, .unprotected = "{\"kid\":\"k\"}" },
     }, .{});
     try shake.check(gpa, JsonCase{ .flattened = flattened.written(), .general = general.written(), .secret = &secret }, anyJsonDocument, .{ .cases = 2000 });
+}
+
+/// Seeds for JWE: a compact token (A128KW), a flattened document (`dir`) and
+/// a general one of two recipients (A256GCMKW, PBES2), all of `content`.
+const JweCase = struct { seeds: [3][]const u8, kek: []const u8, cek: []const u8, wrap: []const u8 };
+const jwe_content = "the one content";
+
+/// Any bytes as a JWE: refused, or decrypted to the one content the seeds
+/// carry (no mutation forges another), under allowlisted algorithms by a
+/// key that fits them, the plaintext inside the scratch.
+fn anyEncrypted(case: JweCase, c: *shake.Case) !void {
+    var buffer: [2048]u8 = undefined;
+    const input = shake.gen.mutated(c.source, &buffer, &case.seeds);
+    var scratch: [jwe.scratchLength(2048)]u8 = undefined;
+    const keys = [_]jwe.DecryptionKey{
+        .{ .material = .{ .secret = case.kek }, .kid = "kw" },
+        .{ .material = .{ .secret = case.cek }, .kid = "dir" },
+        .{ .material = .{ .secret = case.wrap }, .kid = "gcm" },
+        .{ .material = .{ .password = "pass phrase" }, .kid = "pw" },
+    };
+    const options: jwe.Options = .{
+        .key_algorithms = &.{ .a128kw, .dir, .a256gcmkw, .pbes2_hs256_a128kw },
+        .encryptions = &.{ .a128cbc_hs256, .a256gcm },
+        .max_pbes2_count = 64,
+    };
+    const d = jwe.decrypt(std.testing.io, input, &keys, options, &scratch) catch return;
+    if (!std.mem.eql(u8, jwe_content, d.plaintext)) return error.Forged;
+    const start = @intFromPtr(&scratch);
+    const at = @intFromPtr(d.plaintext.ptr);
+    if (at < start or at + d.plaintext.len > start + scratch.len) return error.PlaintextOutsideScratch;
+    if (d.index >= options.max_recipients) return error.IndexOutOfRange;
+    for (keys) |k| {
+        if (k.fits(d.header.alg, d.header.enc)) break;
+    } else return error.KeyDoesNotFit;
+}
+
+test "any bytes are a JWE decrypted to the content its sender sealed, or refused" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const kek: [16]u8 = @splat(0x4b);
+    const cek: [32]u8 = @splat(0x43);
+    const wrap: [32]u8 = @splat(0x57);
+    var compact: std.Io.Writer.Allocating = .init(gpa);
+    defer compact.deinit();
+    var kw = Key.hmac(&kek);
+    kw.kid = "kw";
+    try jwe.encrypt(gpa, io, &compact.writer, .{ .enc = .a128cbc_hs256 }, jwe_content, &.{.{ .alg = .a128kw, .key = .{ .key = kw } }}, .compact, .{});
+    var flattened: std.Io.Writer.Allocating = .init(gpa);
+    defer flattened.deinit();
+    var direct = Key.hmac(&cek);
+    direct.kid = "dir";
+    try jwe.encrypt(gpa, io, &flattened.writer, .{ .enc = .a256gcm }, jwe_content, &.{.{ .alg = .dir, .key = .{ .key = direct } }}, .flattened, .{ .aad = "aad" });
+    var general: std.Io.Writer.Allocating = .init(gpa);
+    defer general.deinit();
+    var gcm = Key.hmac(&wrap);
+    gcm.kid = "gcm";
+    try jwe.encrypt(gpa, io, &general.writer, .{ .enc = .a128cbc_hs256 }, jwe_content, &.{
+        .{ .alg = .a256gcmkw, .key = .{ .key = gcm } },
+        .{ .alg = .pbes2_hs256_a128kw, .key = .{ .password = .{ .password = "pass phrase", .count = 64, .salt_length = 8 } }, .kid = "pw" },
+    }, .general, .{});
+    const case: JweCase = .{ .seeds = .{ compact.written(), flattened.written(), general.written() }, .kek = &kek, .cek = &cek, .wrap = &wrap };
+    try shake.check(gpa, case, anyEncrypted, .{ .cases = 1000 });
+}
+
+/// Any bytes as a nested ID token's JWE: refused, or verified as the signed
+/// token sealed inside, never a plain signed token in its stead.
+fn anyNested(case: NestedCase, c: *shake.Case) !void {
+    var buffer: [2048]u8 = undefined;
+    const input = shake.gen.mutated(c.source, &buffer, &.{ case.nested, case.signed });
+    var scratch: [jwe.scratchLength(2048)]u8 = undefined;
+    const keys = [_]Key{Key.hmac(case.secret)};
+    const verified = jwt.verify(struct { name: []const u8 }, input, &keys, .{
+        .algorithms = &.{.hs256},
+        .required = .{ .exp = false },
+        .decryption = .{ .io = std.testing.io, .keys = &.{.{ .material = .{ .secret = case.kek } }}, .options = .{ .key_algorithms = &.{.a128kw}, .encryptions = &.{.a128gcm} } },
+    }, .{ .nanoseconds = 0 }, &scratch) catch return;
+    if (!std.mem.eql(u8, "sealed", verified.claims.name)) return error.Forged;
+    if (std.mem.count(u8, input, ".") != 4) return error.NotNested;
+}
+
+const NestedCase = struct { nested: []const u8, signed: []const u8, secret: []const u8, kek: []const u8 };
+
+test "any bytes are a nested JWT whose signed content verifies, or refused" {
+    const gpa = std.testing.allocator;
+    const secret: [32]u8 = @splat(0x24);
+    const kek: [16]u8 = @splat(0x4b);
+    var signed: std.Io.Writer.Allocating = .init(gpa);
+    defer signed.deinit();
+    try jws.sign(gpa, std.testing.io, &signed.writer, .{ .typ = "JWT" }, "{\"name\":\"sealed\"}", .{ .hmac = .{ .alg = .hs256, .secret = &secret } });
+    var nested: std.Io.Writer.Allocating = .init(gpa);
+    defer nested.deinit();
+    try jwe.encrypt(gpa, std.testing.io, &nested.writer, .{ .enc = .a128gcm, .cty = "JWT" }, signed.written(), &.{.{ .alg = .a128kw, .key = .{ .key = Key.hmac(&kek) } }}, .compact, .{});
+    try shake.check(gpa, NestedCase{ .nested = nested.written(), .signed = signed.written(), .secret = &secret, .kek = &kek }, anyNested, .{ .cases = 1000 });
 }

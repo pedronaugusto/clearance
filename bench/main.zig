@@ -1,6 +1,6 @@
 //! clearance's benchmarks: JWT and JWS verification and signing per
 //! algorithm, key sets read, flattened JWS JSON verified and signed, DPoP proofs signed and verified, a logout token
-//! verified; and OAuth's
+//! verified, JWE decrypted and encrypted (AES key wrap, RSA-OAEP-256, `dir`) and a nested ID token verified; and OAuth's
 //! messages: a token response read
 //! into a `TokenSet`, a device authorization read (RFC 8628), a revocation request written and answered (RFC 7009), a pushed request
 //! written and answered (RFC 9126), a UserInfo answer read, an authorization server's metadata read, an
@@ -13,7 +13,7 @@ const oauth = @import("clearance.oauth");
 const shakedown = @import("shakedown");
 const provenance = @import("preflight_bench_options");
 
-const WorkloadError = clearance.jwt.VerifyError || clearance.dpop.VerifyError || clearance.logout.VerifyError || clearance.jwk.PrivateError || clearance.jwt.SignError || clearance.jwk.ParseError ||
+const WorkloadError = clearance.jwt.VerifyError || clearance.jwe.DecryptError || clearance.jwe.EncryptError || clearance.id_token.VerifyError || clearance.dpop.VerifyError || clearance.logout.VerifyError || clearance.jwk.PrivateError || clearance.jwt.SignError || clearance.jwk.ParseError ||
     oauth.token.ReadError || oauth.device.ReadError || oauth.revocation.ReadError || oauth.par.ReadError || oauth.userinfo.ReadError || oauth.client_auth.Error || oauth.metadata.ReadError || oauth.authorize.WriteError || error{Refused};
 const Row = shakedown.bench.Row(Bench, WorkloadError);
 
@@ -52,6 +52,14 @@ const flattened_payload = "{\"exp\":4000000000,\"sub\":\"user-1\",\"scope\":\"re
 const logout_claims = "{\"iss\":\"https://server.example.com\",\"sub\":\"248289761001\",\"aud\":\"s6BhdRkqt3\",\"iat\":1471566154,\"exp\":1471566274,\"jti\":\"bWJq\",\"sid\":\"08a5019c-17e1-4977-8f42-65a12843ea02\",\"events\":{\"http://schemas.openid.net/event/backchannel-logout\":{}}}";
 const logout_now: std.Io.Timestamp = .{ .nanoseconds = 1_471_566_200 * std.time.ns_per_s };
 
+/// JWE's content: the bench's claims, as a token's.
+const jwe_content = flattened_payload;
+const kek: [16]u8 = @splat(0x4b);
+
+/// An ID token's claims, as OpenID Connect Core §3.1.3.7 checks them.
+const id_token_claims = "{\"iss\":\"https://op.example\",\"sub\":\"248289761001\",\"aud\":\"app\",\"nonce\":\"n-0S6_WzA2Mj\",\"exp\":1700000600,\"iat\":1699999990}";
+const id_token_now: std.Io.Timestamp = .{ .nanoseconds = 1_700_000_000 * std.time.ns_per_s };
+
 /// OpenID Connect Core §5.3.2's example answer.
 const userinfo_answer =
     \\{"sub":"248289761001","name":"Jane Doe","given_name":"Jane","family_name":"Doe","preferred_username":"j.doe",
@@ -80,6 +88,10 @@ const Bench = struct {
     verified: clearance.dpop.Verified = undefined,
     logout_token: std.Io.Writer.Allocating = undefined,
     json_scratch: []u8 = &.{},
+    jwe_token: std.Io.Writer.Allocating = undefined,
+    jwe_scratch: []u8 = &.{},
+    jwe_key: clearance.jwe.DecryptionKey = undefined,
+    jwe_recipient: clearance.jwe.Recipient = undefined,
 
     fn setupDpop(b: *Bench) WorkloadError!void {
         b.private = try clearance.jwk.PrivateKey.parse(b.gpa, es256_private_jwk, .{});
@@ -254,6 +266,88 @@ const Bench = struct {
         }
     }
 
+    /// A compact JWE of `jwe_content` to the recipient, and the key that
+    /// decrypts it.
+    fn sealJwe(b: *Bench, enc: clearance.jwe.ContentEncryption) WorkloadError!void {
+        b.jwe_token = .init(b.gpa);
+        try clearance.jwe.encrypt(b.gpa, b.io, &b.jwe_token.writer, .{ .enc = enc }, jwe_content, &.{b.jwe_recipient}, .compact, .{});
+        b.jwe_scratch = try b.gpa.alloc(u8, clearance.jwe.scratchLength(b.jwe_token.written().len));
+    }
+
+    fn setupKeyWrap(b: *Bench) WorkloadError!void {
+        b.jwe_key = .{ .material = .{ .secret = &kek } };
+        b.jwe_recipient = .{ .alg = .a128kw, .key = .{ .key = clearance.Key.hmac(&kek) } };
+        try b.sealJwe(.a128cbc_hs256);
+    }
+
+    fn setupDirect(b: *Bench) WorkloadError!void {
+        b.jwe_key = .{ .material = .{ .secret = &secret } };
+        b.jwe_recipient = .{ .alg = .dir, .key = .{ .key = clearance.Key.hmac(&secret) } };
+        try b.sealJwe(.a256gcm);
+    }
+
+    fn setupRsaOaep(b: *Bench) WorkloadError!void {
+        b.private = try clearance.jwk.PrivateKey.parse(b.gpa, @embedFile("data/rsa_oaep_256.jwk.json"), .{ .purpose = .encryption });
+        b.jwe_key = clearance.jwe.DecryptionKey.fromJwk(&b.private) catch return error.InvalidKey;
+        b.jwe_recipient = .{ .alg = .rsa_oaep_256, .key = .{ .key = b.private.public } };
+        try b.sealJwe(.a256gcm);
+    }
+
+    fn teardownJwe(b: *Bench) WorkloadError!void {
+        b.gpa.free(b.jwe_scratch);
+        b.jwe_token.deinit();
+    }
+
+    fn teardownRsaOaep(b: *Bench) WorkloadError!void {
+        try b.teardownJwe();
+        b.private.deinit();
+    }
+
+    fn decryptJwe(b: *Bench, units: u64) WorkloadError!void {
+        const options: clearance.jwe.Options = .{ .key_algorithms = &.{ .a128kw, .dir, .rsa_oaep_256 }, .encryptions = &.{ .a128cbc_hs256, .a256gcm } };
+        for (0..units) |_| {
+            const d = try clearance.jwe.decrypt(b.io, b.jwe_token.written(), &.{b.jwe_key}, options, b.jwe_scratch);
+            b.sink +%= d.plaintext.len;
+        }
+    }
+
+    fn encryptJwe(b: *Bench, units: u64) WorkloadError!void {
+        var out: std.Io.Writer.Allocating = .init(b.gpa);
+        defer out.deinit();
+        const enc: clearance.jwe.ContentEncryption = if (b.jwe_recipient.alg == .a128kw) .a128cbc_hs256 else .a256gcm;
+        for (0..units) |_| {
+            out.clearRetainingCapacity();
+            try clearance.jwe.encrypt(b.gpa, b.io, &out.writer, .{ .enc = enc }, jwe_content, &.{b.jwe_recipient}, .compact, .{});
+            b.sink +%= out.written().len;
+        }
+    }
+
+    /// An ID token signed HS256, then encrypted A128KW and A128GCM (OpenID
+    /// Connect Core §10.2): decrypted, then verified with its checks.
+    fn setupNested(b: *Bench) WorkloadError!void {
+        var signed: std.Io.Writer.Allocating = .init(b.gpa);
+        defer signed.deinit();
+        try clearance.jws.sign(b.gpa, b.io, &signed.writer, .{ .typ = "JWT" }, id_token_claims, .{ .hmac = .{ .alg = .hs256, .secret = &secret } });
+        b.jwe_token = .init(b.gpa);
+        try clearance.jwe.encrypt(b.gpa, b.io, &b.jwe_token.writer, .{ .enc = .a128gcm, .cty = "JWT" }, signed.written(), &.{.{ .alg = .a128kw, .key = .{ .key = clearance.Key.hmac(&kek) } }}, .compact, .{});
+        b.jwe_scratch = try b.gpa.alloc(u8, clearance.jwe.scratchLength(b.jwe_token.written().len));
+    }
+
+    fn verifyNested(b: *Bench, units: u64) WorkloadError!void {
+        const keys = [_]clearance.Key{clearance.Key.hmac(&secret)};
+        const expected: clearance.id_token.Expected = .{
+            .algorithms = &.{.hs256},
+            .issuer = "https://op.example",
+            .client_id = "app",
+            .nonce = "n-0S6_WzA2Mj",
+            .decryption = .{ .io = b.io, .keys = &.{.{ .material = .{ .secret = &kek } }}, .options = .{ .key_algorithms = &.{.a128kw}, .encryptions = &.{.a128gcm} } },
+        };
+        for (0..units) |_| {
+            const v = try clearance.id_token.verify(void, b.jwe_token.written(), &keys, expected, id_token_now, b.jwe_scratch);
+            b.sink +%= v.registered.sub.?.len;
+        }
+    }
+
     fn setupLogout(b: *Bench) WorkloadError!void {
         b.logout_token = .init(b.gpa);
         try clearance.jws.sign(b.gpa, b.io, &b.logout_token.writer, .{ .typ = clearance.logout.media_type }, logout_claims, .{ .hmac = .{ .alg = .hs256, .secret = &secret } });
@@ -309,6 +403,12 @@ const rows = [_]Row{
     .{ .name = "dpop/verify-proof-es256", .unit = "proof", .run = Bench.verifyProof, .fixture = .{ .lifetime = .row, .setup = Bench.setupDpop, .teardown = Bench.teardownDpop } },
     .{ .name = "jws/verify-flattened-hs256", .unit = "document", .run = Bench.verifyFlattened, .fixture = .{ .lifetime = .row, .setup = Bench.setupFlattened, .teardown = Bench.teardownFlattened } },
     .{ .name = "jws/sign-flattened-hs256", .unit = "document", .run = Bench.signFlattened },
+    .{ .name = "jwe/decrypt-a128kw-a128cbc-hs256", .unit = "token", .run = Bench.decryptJwe, .fixture = .{ .lifetime = .row, .setup = Bench.setupKeyWrap, .teardown = Bench.teardownJwe } },
+    .{ .name = "jwe/encrypt-a128kw-a128cbc-hs256", .unit = "token", .run = Bench.encryptJwe, .fixture = .{ .lifetime = .row, .setup = Bench.setupKeyWrap, .teardown = Bench.teardownJwe } },
+    .{ .name = "jwe/decrypt-dir-a256gcm", .unit = "token", .run = Bench.decryptJwe, .fixture = .{ .lifetime = .row, .setup = Bench.setupDirect, .teardown = Bench.teardownJwe } },
+    .{ .name = "jwe/decrypt-rsa-oaep-256-2048-a256gcm", .unit = "token", .run = Bench.decryptJwe, .fixture = .{ .lifetime = .row, .setup = Bench.setupRsaOaep, .teardown = Bench.teardownRsaOaep } },
+    .{ .name = "jwe/encrypt-rsa-oaep-256-2048-a256gcm", .unit = "token", .run = Bench.encryptJwe, .fixture = .{ .lifetime = .row, .setup = Bench.setupRsaOaep, .teardown = Bench.teardownRsaOaep } },
+    .{ .name = "id_token/verify-nested-a128kw-hs256", .unit = "token", .run = Bench.verifyNested, .fixture = .{ .lifetime = .row, .setup = Bench.setupNested, .teardown = Bench.teardownJwe } },
     .{ .name = "logout/verify-token-hs256", .unit = "token", .run = Bench.verifyLogoutToken, .fixture = .{ .lifetime = .row, .setup = Bench.setupLogout, .teardown = Bench.teardownLogout } },
     .{ .name = "oauth/read-token-response", .unit = "response", .run = Bench.readTokenResponse },
     .{ .name = "oauth/read-device-authorization", .unit = "response", .run = Bench.readDeviceAuthorization },

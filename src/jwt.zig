@@ -5,6 +5,7 @@ const std = @import("std");
 const aegis = @import("aegis");
 const strand = @import("strand");
 const jws = @import("jws.zig");
+const jwe = @import("jwe.zig");
 const Algorithm = @import("Algorithm.zig").Algorithm;
 const Key = @import("Key.zig");
 
@@ -85,7 +86,21 @@ pub const Validation = struct {
     ignore_unknown_claims: bool = true,
     max_bytes: aegis.units.Bytes(usize) = .literal("16KiB"),
     min_rsa_bits: u16 = 2048,
+    /// Set when the token is to come encrypted (a client that registered an
+    /// encryption algorithm, OpenID Connect Registration §2): it must be a
+    /// nested JWT (RFC 7519 §5.2), a compact JWE these keys decrypt whose
+    /// content is the signed token, `cty` `JWT` or none. A signed token
+    /// alone is then refused (`NotEncrypted`). Null takes a signed token.
+    decryption: ?Decryption = null,
     diagnostics: ?*jws.Diagnostics = null,
+};
+
+/// What a nested JWT is decrypted with: the recipient's keys and the JWE
+/// allowlists, as `jwe.decrypt` takes them, and the `io` it draws from.
+pub const Decryption = struct {
+    io: std.Io,
+    keys: []const jwe.DecryptionKey,
+    options: jwe.Options,
 };
 
 pub fn Verified(comptime Claims: type) type {
@@ -117,12 +132,17 @@ pub const VerifyError = jws.VerifyError || error{
     TooOld,
     /// A claim the validation requires is absent.
     MissingClaim,
+} || NestedError;
+
+pub const NestedError = jwe.DecryptError || error{
+    /// `decryption` was set and the token is signed, not encrypted.
+    NotEncrypted,
 };
 
 /// Verifies a JWT and reads its claims into `Claims` (a struct, or `void`).
 /// `now` is the time the checks are made at. Strings borrow from `scratch`,
-/// which holds at least `jws.scratchLength(token.len)` bytes, and from the
-/// keys.
+/// which holds at least `jws.scratchLength(token.len)` bytes
+/// (`jwe.scratchLength(token.len)` with `decryption`), and from the keys.
 pub fn verify(comptime Claims: type, token: []const u8, keys: []const Key, validation: Validation, now: std.Io.Timestamp, scratch: []u8) VerifyError!Verified(Claims) {
     const leeway_seconds: u32 = validation.leeway.raw();
     std.debug.assert(leeway_seconds <= 300);
@@ -130,12 +150,23 @@ pub fn verify(comptime Claims: type, token: []const u8, keys: []const Key, valid
     defer if (validation.diagnostics) |d| {
         d.* = diagnostics;
     };
-    const verified = try jws.verify(token, keys, .{
+    var signed = token;
+    var room = scratch;
+    if (validation.decryption) |decryption| {
+        const nested = try decryptNested(token, decryption, scratch, &diagnostics);
+        if (nested.content_type == .other) {
+            diagnostics.check = .type;
+            return error.WrongType;
+        }
+        signed = nested.content;
+        room = nested.rest;
+    }
+    const verified = try jws.verify(signed, keys, .{
         .algorithms = validation.algorithms,
         .max_bytes = validation.max_bytes,
         .min_rsa_bits = validation.min_rsa_bits,
         .diagnostics = &diagnostics,
-    }, scratch);
+    }, room);
     const read = readClaims(Claims, verified.header.typ, verified.payload, verified.rest, inspectionOf(validation), now) catch |err| {
         diagnostics.check = switch (err) {
             error.InvalidClaims => .claims,
@@ -152,6 +183,45 @@ pub fn verify(comptime Claims: type, token: []const u8, keys: []const Key, valid
     };
     return .{ .header = verified.header, .registered = read.registered, .claims = read.claims, .key = verified.key, .payload = verified.payload, .rest = read.rest };
 }
+
+/// A compact JWE's content, decrypted.
+pub const Nested = struct {
+    alg: jwe.KeyManagement,
+    enc: jwe.ContentEncryption,
+    /// What the header's `cty` says the content is.
+    content_type: ContentType,
+    /// The content, at the front of the scratch buffer.
+    content: []const u8,
+    /// The scratch buffer after the content, wiped: room for the next step.
+    rest: []u8,
+};
+
+/// Decrypts the compact JWE a nested JWT or an encrypted answer is (JWTs
+/// are compact, RFC 7519 §1: a JSON document is `Malformed`); a compact JWS
+/// is `NotEncrypted`. The content is moved to the front of `scratch`
+/// (`jwe.scratchLength(token.len)` bytes) and the rest wiped; the caller
+/// erases the content when done.
+pub fn decryptNested(token: []const u8, decryption: Decryption, scratch: []u8, diagnostics: *jws.Diagnostics) NestedError!Nested {
+    if (std.mem.count(u8, token, ".") == 2) {
+        diagnostics.check = .shape;
+        return error.NotEncrypted;
+    }
+    if (token.len > 0 and token[0] == '{') {
+        diagnostics.check = .shape;
+        return error.Malformed;
+    }
+    var options = decryption.options;
+    options.diagnostics = diagnostics;
+    const d = try jwe.decrypt(decryption.io, token, decryption.keys, options, scratch);
+    // Read before the header's strings, which live past the content, are wiped.
+    const content_type: ContentType = if (d.header.cty) |cty| (if (mediaTypeIs(cty, "JWT")) .jwt else .other) else .none;
+    @memmove(scratch[0..d.plaintext.len], d.plaintext);
+    std.crypto.secureZero(u8, scratch[d.plaintext.len..]);
+    return .{ .alg = d.header.alg, .enc = d.header.enc, .content_type = content_type, .content = scratch[0..d.plaintext.len], .rest = scratch[d.plaintext.len..] };
+}
+
+/// A JWE header's `cty`: absent, `JWT` (a nested token), or another.
+pub const ContentType = enum { none, jwt, other };
 
 /// The checks of a token's type and claims: a `Validation` without the
 /// signature's part, for `inspect`.

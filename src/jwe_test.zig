@@ -230,13 +230,19 @@ test "JWE: RFC 7520 §5.13: each held key decrypts its recipient of three; the R
 test "JWE: RFC 7520 §5.1 (RSA1_5) and §5.9 (compressed) are refused" {
     var v1 = try Vector.load("5_1.key_encryption_using_rsa_v15_and_aes-hmac-sha2.json");
     defer v1.deinit();
-    // The key's own `alg` is RSA1_5: it is not read as a decryption key.
-    try std.testing.expectError(error.InvalidAlgorithm, jwk.PrivateKey.parse(gpa, try stringify(v1.arena.allocator(), v1.get(&.{ "input", "key" }).?), .{ .purpose = .encryption }));
+    // The key names no `alg`, so it is read as an RSA key; RSA1_5 is still no
+    // algorithm the recipient decrypts under, with the key held.
+    var held1 = try hold(try stringify(v1.arena.allocator(), v1.get(&.{ "input", "key" }).?));
+    defer held1.deinit();
     for (try v1.tokens()) |token| {
         const scratch = try gpa.alloc(u8, jwe.scratchLength(token.len));
         defer gpa.free(scratch);
-        try std.testing.expectError(error.AlgorithmNotAllowed, jwe.decrypt(io, token, &.{}, options, scratch));
+        try std.testing.expectError(error.AlgorithmNotAllowed, jwe.decrypt(io, token, &.{held1.key}, options, scratch));
     }
+    // The same key naming RSA1_5 as its `alg` is not read as a decryption key.
+    var named = v1.get(&.{ "input", "key" }).?;
+    try named.object.put(v1.arena.allocator(), "alg", .{ .string = "RSA1_5" });
+    try std.testing.expectError(error.InvalidAlgorithm, jwk.PrivateKey.parse(gpa, try stringify(v1.arena.allocator(), named), .{ .purpose = .encryption }));
     var v9 = try Vector.load("5_9.compressed_content.json");
     defer v9.deinit();
     var held = try hold(try stringify(v9.arena.allocator(), v9.get(&.{ "input", "key" }).?));
@@ -295,7 +301,20 @@ test "JWE: allowlists, keys and tampering: what a recipient refuses" {
     try std.testing.expectError(error.ScratchTooSmall, jwe.decrypt(io, token, &.{held}, options, scratch[0..10]));
 }
 
-const WycheproofCase = struct { tcId: []const u8, comment: []const u8, pt: []const u8, jwe: []const u8, result: []const u8 };
+const WycheproofCase = struct {
+    tcId: u32,
+    comment: []const u8,
+    pt: []const u8 = "",
+    jwe: []const u8,
+    result: []const u8,
+    enc: []const u8 = "",
+    flags: []const []const u8 = &.{},
+
+    fn flagged(t: WycheproofCase, flag: []const u8) bool {
+        for (t.flags) |f| if (std.mem.eql(u8, f, flag)) return true;
+        return false;
+    }
+};
 const WycheproofGroup = struct { private: std.json.Value, tests: []const WycheproofCase };
 const WycheproofFile = struct { numberOfTests: u32, testGroups: []const WycheproofGroup };
 
@@ -324,16 +343,42 @@ test "JWE: Wycheproof json_web_encryption: valid tokens decrypt, invalid ones ar
             ran += 1;
             const scratch = try arena.alloc(u8, jwe.scratchLength(t.jwe.len));
             const made = jwe.decrypt(io, t.jwe, &.{held.key}, options, scratch);
+            // A192GCM and A192CBC-HS384 under a key clearance holds: refused
+            // as no algorithm it has.
+            if (std.mem.startsWith(u8, t.enc, "A192")) {
+                try std.testing.expectError(error.AlgorithmNotAllowed, made);
+                ran -= 1;
+                not_offered += 1;
+                continue;
+            }
+            // Compressed content (RFC 7520 §5.9, its Figure 170): refused by
+            // design, as `zip` always is.
+            if (t.flagged("CompressedPlaintext")) {
+                try std.testing.expectError(error.Compressed, made);
+                ran -= 1;
+                not_offered += 1;
+                continue;
+            }
+            // Wycheproof's harness reads the compact serialization alone, so
+            // a sound JSON document is "invalid" there (its note says so);
+            // clearance reads both, and decrypts it.
+            if (t.flagged("JsonSerialization")) {
+                _ = made catch |err| {
+                    std.debug.print("json_web_encryption tcId {d} ({s}): {t}\n", .{ t.tcId, t.comment, err });
+                    return err;
+                };
+                continue;
+            }
             if (std.mem.eql(u8, t.result, "valid")) {
                 const d = made catch |err| {
-                    std.debug.print("json_web_encryption tcId {s} ({s}): {t}\n", .{ t.tcId, t.comment, err });
+                    std.debug.print("json_web_encryption tcId {d} ({s}): {t}\n", .{ t.tcId, t.comment, err });
                     return err;
                 };
                 const pt = try arena.alloc(u8, t.pt.len / 2);
                 _ = try std.fmt.hexToBytes(pt, t.pt);
                 try std.testing.expectEqualSlices(u8, pt, d.plaintext);
             } else if (made) |_| {
-                std.debug.print("json_web_encryption tcId {s} ({s}) decrypted\n", .{ t.tcId, t.comment });
+                std.debug.print("json_web_encryption tcId {d} ({s}) decrypted\n", .{ t.tcId, t.comment });
                 return error.TestUnexpectedResult;
             } else |_| {}
         }

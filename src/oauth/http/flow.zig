@@ -341,7 +341,9 @@ pub const AuthorizationFlow = struct {
     /// Verifies the ID token `set` brought (`error.NoIdToken` when none):
     /// for the client `client_id` from `server`, with this flow's `nonce` and
     /// the set's access token for `at_hash`, signed by one of `keys` with one
-    /// of `algorithms`. Strings borrow from `scratch` and the keys.
+    /// of `algorithms`, decrypted first with `decryption` when the client
+    /// registered encrypted ID tokens. Strings borrow from `scratch` and the
+    /// keys.
     pub fn verifyIdToken(
         flow: *const AuthorizationFlow,
         comptime Extra: type,
@@ -350,6 +352,7 @@ pub const AuthorizationFlow = struct {
         client_id: []const u8,
         keys: []const clearance.Key,
         algorithms: []const clearance.Algorithm,
+        decryption: ?clearance.jwt.Decryption,
         now: std.Io.Timestamp,
         scratch: []u8,
     ) (clearance.id_token.VerifyError || error{NoIdToken})!clearance.id_token.Verified(Extra) {
@@ -360,6 +363,7 @@ pub const AuthorizationFlow = struct {
             .client_id = client_id,
             .nonce = if (flow.nonce) |*n| n else null,
             .access_token = set.access_token,
+            .decryption = decryption,
         }, now, scratch);
     }
 
@@ -525,6 +529,9 @@ pub const UserInfoOptions = struct {
     /// algorithms that verify them (the issuer and client come from the
     /// call).
     signed: ?struct { keys: []const clearance.Key, algorithms: []const clearance.Algorithm, client_id: []const u8 } = null,
+    /// Set when the client registered encrypted answers: the keys and
+    /// allowlists that decrypt them.
+    encrypted: ?clearance.jwt.Decryption = null,
     /// The DPoP session a DPoP-bound set's token is presented with.
     dpop: ?*dpop.Session = null,
     max_bytes: fetch.Bytes = .literal("64KiB"),
@@ -578,7 +585,7 @@ pub fn userinfo(comptime Claims: type, arena: std.mem.Allocator, io: std.Io, htt
             }
         };
         const signed: ?userinfo_message.Expected.Signed = if (options.signed) |s| .{ .keys = s.keys, .algorithms = s.algorithms, .issuer = server.issuer, .client_id = s.client_id, .now = std.Io.Clock.real.now(io) } else null;
-        return userinfo_message.readResponse(Claims, arena, answer.status, answer.content_type.slice(), answer.challenges, answer.body, .{ .subject = subject, .signed = signed }, .{ .max_bytes = options.max_bytes });
+        return userinfo_message.readResponse(Claims, arena, answer.status, answer.content_type.slice(), answer.challenges, answer.body, .{ .subject = subject, .signed = signed, .encrypted = options.encrypted }, .{ .max_bytes = options.max_bytes });
     }
 }
 
