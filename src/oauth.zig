@@ -33,6 +33,8 @@ pub const exchange = @import("oauth/exchange.zig");
 pub const id_jag = @import("oauth/id_jag.zig");
 /// Device authorization (RFC 8628): a device's codes asked for and read.
 pub const device = @import("oauth/device.zig");
+/// Token revocation (RFC 7009).
+pub const revocation = @import("oauth/revocation.zig");
 /// Dynamic client registration (RFC 7591) and client ID metadata documents.
 pub const registration = @import("oauth/registration.zig");
 /// Token introspection (RFC 7662).
@@ -76,6 +78,10 @@ pub const jwtBearer = http_flow.jwtBearer;
 pub const requestIdJag = http_flow.requestIdJag;
 /// An access token for an ID-JAG, from the authorization server it names.
 pub const redeemIdJag = http_flow.redeemIdJag;
+/// A token revoked at the authorization server (RFC 7009).
+pub const revoke = http_flow.revoke;
+pub const RevokeOptions = http_flow.RevokeOptions;
+pub const RevokeError = http_flow.RevokeError;
 /// Dynamic client registration (RFC 7591).
 pub const register = http_flow.register;
 /// The tokens a store keeps, refreshed first when they are about to expire.
@@ -123,6 +129,7 @@ test {
     _ = exchange;
     _ = id_jag;
     _ = device;
+    _ = revocation;
     _ = registration;
     _ = introspection;
     _ = challenge;

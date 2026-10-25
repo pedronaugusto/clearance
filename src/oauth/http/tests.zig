@@ -46,6 +46,8 @@ const Provider = struct {
     device_answers: []const []const u8 = &.{"{\"access_token\":\"dev-at\",\"token_type\":\"Bearer\",\"expires_in\":600}"},
     device_polls: u32 = 0,
     device_expires_in: u32 = 600,
+    revoked_buffer: [32]u8 = undefined,
+    revoked: []const u8 = "",
 
     fn start(p: *Provider, io: Io) !void {
         p.* = .{ .gpa = testing.allocator, .http = undefined, .listener = undefined, .serving = undefined, .port = 0 };
@@ -99,6 +101,28 @@ const Provider = struct {
             p.mutex.unlock(io);
             return response.send(io, try arena.print("{{\"device_code\":\"dc-1\",\"user_code\":\"WDJB-MJHT\",\"verification_uri\":\"{s}/activate\",\"expires_in\":{d},\"interval\":1}}", .{ p.base, expires_in }));
         }
+        if (std.mem.eql(u8, path, "/revoke")) {
+            const body = try request.collect(arena, io, .limited(4096));
+            if (!std.mem.eql(u8, field(arena, body, "client_id") orelse "", "app")) {
+                response.status = .unauthorized;
+                return response.send(io, "{\"error\":\"invalid_client\"}");
+            }
+            const presented = field(arena, body, "token") orelse return refuse(io, response, "invalid_request");
+            if (std.mem.eql(u8, presented, "busy")) {
+                response.status = .service_unavailable;
+                return response.send(io, "");
+            }
+            if (std.mem.eql(u8, field(arena, body, "token_type_hint") orelse "", "access_token") and std.mem.eql(u8, presented, "jwt-at")) {
+                return refuse(io, response, "unsupported_token_type");
+            }
+            p.mutex.lockUncancelable(io);
+            defer p.mutex.unlock(io);
+            const n = @min(presented.len, p.revoked_buffer.len);
+            @memcpy(p.revoked_buffer[0..n], presented[0..n]);
+            p.revoked = p.revoked_buffer[0..n];
+            // An unknown token is answered as a revoked one (RFC 7009 §2.2).
+            return response.send(io, "");
+        }
         if (std.mem.eql(u8, path, "/register")) {
             if (!std.mem.eql(u8, request.headers.get("authorization") orelse "", "Bearer initial")) {
                 response.status = .unauthorized;
@@ -140,9 +164,9 @@ const Provider = struct {
     fn metadata(p: *Provider, arena: std.mem.Allocator, issuer: []const u8) ![]const u8 {
         return arena.print(
             \\{{"issuer":"{s}","authorization_endpoint":"{s}/authorize","token_endpoint":"{s}/token","registration_endpoint":"{s}/register",
-            \\"jwks_uri":"{s}/jwks","introspection_endpoint":"{s}/introspect","device_authorization_endpoint":"{s}/device","code_challenge_methods_supported":["S256"],
+            \\"jwks_uri":"{s}/jwks","introspection_endpoint":"{s}/introspect","device_authorization_endpoint":"{s}/device","revocation_endpoint":"{s}/revoke","code_challenge_methods_supported":["S256"],
             \\"grant_types_supported":["authorization_code","refresh_token","client_credentials"],"authorization_response_iss_parameter_supported":true}}
-        , .{ issuer, p.base, p.base, p.base, p.base, p.base, p.base });
+        , .{ issuer, p.base, p.base, p.base, p.base, p.base, p.base, p.base });
     }
 
     /// What a browser would do: the request read, and the redirect back
@@ -502,6 +526,37 @@ test "device authorization: a refusal ends the wait, and codes about to expire a
 
     const refused = try oauth.DeviceFlow.begin(gpa, io, &http, &server.value, .{ .id = "someone" }, .{}, .{});
     try testing.expectEqual(oauth.errors.Code.invalid_client, refused.refused.code);
+}
+
+test "revocation: the refresh token revoked, then the store forgets it; a refusal and a 503 are the server's" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var p: Provider = undefined;
+    try p.start(io);
+    defer p.stop(io);
+    var http: uplink.Client = .init(gpa, .{});
+    defer http.deinit(io);
+    var server = try oauth.discover(gpa, io, &http, p.base, .{});
+    defer server.deinit();
+    const app: oauth.Client = .{ .id = "app" };
+
+    var memory: oauth.store.Memory = .init(gpa);
+    defer memory.deinit();
+    const tokens = memory.store();
+    var set = try oauth.TokenSet.init(gpa, .{ .access_token = "at1", .refresh_token = "rt1" });
+    defer set.deinit();
+    try tokens.save(io, "srv", &set);
+    // A sign-out: the grant ended at the server, then forgotten here.
+    try testing.expectEqual(oauth.revocation.Response.revoked, try oauth.revoke(gpa, io, &http, &server.value, app, set.refresh_token.?, .refresh_token, .{}));
+    tokens.forget(io, "srv");
+    try testing.expectEqualStrings("rt1", p.revoked);
+    try testing.expectEqual(@as(?oauth.TokenSet, null), try tokens.load(io, gpa, "srv"));
+
+    const unsupported = try oauth.revoke(gpa, io, &http, &server.value, app, "jwt-at", .access_token, .{});
+    try testing.expectEqual(oauth.errors.Code.unsupported_token_type, unsupported.refused.code);
+    const stranger = try oauth.revoke(gpa, io, &http, &server.value, .{ .id = "stranger" }, "rt1", null, .{});
+    try testing.expectEqual(oauth.errors.Code.invalid_client, stranger.refused.code);
+    try testing.expectError(error.UnexpectedStatus, oauth.revoke(gpa, io, &http, &server.value, app, "busy", null, .{}));
 }
 
 test "registration with an initial access token" {

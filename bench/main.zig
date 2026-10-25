@@ -1,6 +1,6 @@
 //! clearance's benchmarks: JWT and JWS verification and signing per
 //! algorithm, key sets read; and OAuth's messages: a token response read
-//! into a `TokenSet`, a device authorization read (RFC 8628), an authorization server's metadata read, an
+//! into a `TokenSet`, a device authorization read (RFC 8628), a revocation request written and answered (RFC 7009), an authorization server's metadata read, an
 //! authorization URL written with its PKCE verifier and state drawn. `bay bench` runs them in ReleaseFast and
 //! writes one JSON line per row to stdout; `bay test` runs each row once with
 //! `--smoke`. Timings are taken by hand, never in CI.
@@ -11,7 +11,7 @@ const shakedown = @import("shakedown");
 const provenance = @import("preflight_bench_options");
 
 const WorkloadError = clearance.jwt.VerifyError || clearance.jwt.SignError || clearance.jwk.ParseError ||
-    oauth.token.ReadError || oauth.device.ReadError || oauth.metadata.ReadError || oauth.authorize.WriteError || error{Refused};
+    oauth.token.ReadError || oauth.device.ReadError || oauth.revocation.ReadError || oauth.client_auth.Error || oauth.metadata.ReadError || oauth.authorize.WriteError || error{Refused};
 const Row = shakedown.bench.Row(Bench, WorkloadError);
 
 const secret: [32]u8 = @splat(0x2a);
@@ -114,6 +114,18 @@ const Bench = struct {
         }
     }
 
+    /// RFC 7009 §2.1's request, with Basic, and its answer read.
+    fn revokeRequest(b: *Bench, units: u64) WorkloadError!void {
+        const client: oauth.Client = .{ .id = "s6BhdRkqt3", .credentials = .{ .client_secret_basic = "7Fjfp0ZBr1KtDRbnfVdmIw" } };
+        for (0..units) |_| {
+            var request = try oauth.revocation.request(b.gpa, b.io, client, "45ghiukldjahdnhzdauz/", .refresh_token, .{ .issuer = "https://server.example.com", .now = .{ .nanoseconds = 0 } });
+            b.sink +%= request.body.len();
+            request.deinit();
+            const answer = try oauth.revocation.readResponse(200, "", .{});
+            if (answer != .revoked) return error.Refused;
+        }
+    }
+
     fn readMetadata(b: *Bench, units: u64) WorkloadError!void {
         for (0..units) |_| {
             var parsed = try oauth.metadata.readAuthorizationServer(b.gpa, metadata, "https://server.example.com", .{});
@@ -158,6 +170,7 @@ const rows = [_]Row{
     .{ .name = "jwk/parse-ed25519-set", .unit = "set", .run = Bench.parseSet },
     .{ .name = "oauth/read-token-response", .unit = "response", .run = Bench.readTokenResponse },
     .{ .name = "oauth/read-device-authorization", .unit = "response", .run = Bench.readDeviceAuthorization },
+    .{ .name = "oauth/revocation-request", .unit = "request", .run = Bench.revokeRequest },
     .{ .name = "oauth/read-metadata-rfc8414", .unit = "document", .run = Bench.readMetadata },
     .{ .name = "oauth/write-authorization-url", .unit = "url", .run = Bench.writeAuthorizationUrl },
 };

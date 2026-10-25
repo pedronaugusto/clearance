@@ -36,6 +36,9 @@ pub const Code = enum {
     authorization_pending,
     slow_down,
     expired_token,
+    /// RFC 7009 §2.2.1: the server does not revoke (or introspect, as
+    /// oidc-provider answers for its JWTs) tokens of this kind.
+    unsupported_token_type,
     other,
 
     pub fn parse(name: []const u8) Code {

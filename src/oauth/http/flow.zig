@@ -16,6 +16,7 @@ const token = @import("../token.zig");
 const registration = @import("../registration.zig");
 const id_jag = @import("../id_jag.zig");
 const device = @import("../device.zig");
+const revocation = @import("../revocation.zig");
 const store = @import("../store.zig");
 const fetch = @import("fetch.zig");
 
@@ -370,6 +371,29 @@ pub const DeviceFlow = struct {
         }
     }
 };
+
+pub const RevokeOptions = struct {
+    max_bytes: fetch.Bytes = .literal("64KiB"),
+    fetch: fetch.Options = .{},
+};
+
+pub const RevokeError = fetch.Error || client_auth.Error || revocation.ReadError || error{
+    /// The metadata names no revocation endpoint.
+    NoRevocationEndpoint,
+};
+
+/// Revokes `token` at `server` (RFC 7009), authenticated as `client`. For a
+/// sign-out, revoke the refresh token (the server ends the grant and its
+/// access tokens with it, §2.1), then forget the store's entry. Sent once:
+/// a refusal, a 503 among them, is the server's answer.
+pub fn revoke(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, server: *const Server, client: Client, token_text: []const u8, hint: ?revocation.Hint, options: RevokeOptions) RevokeError!revocation.Response {
+    const endpoint = server.revocation_endpoint orelse return error.NoRevocationEndpoint;
+    var request = try revocation.request(gpa, io, client, token_text, hint, .{ .issuer = server.issuer, .now = std.Io.Clock.real.now(io) });
+    defer request.deinit();
+    var answer = try fetch.postForm(gpa, io, http, endpoint, &request, options.max_bytes, options.fetch);
+    defer answer.deinit();
+    return revocation.readResponse(answer.status, answer.body.expose(), .{ .max_bytes = options.max_bytes });
+}
 
 pub const RegisterOptions = struct {
     /// RFC 7591 §3's initial access token, when the server asks for one.

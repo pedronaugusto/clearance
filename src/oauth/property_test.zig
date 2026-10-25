@@ -96,6 +96,27 @@ test "any bytes are read as a device authorization, the server's error, or refus
     try shake.check(std.testing.allocator, {}, anyDeviceAuthorization, .{ .cases = 1000 });
 }
 
+/// Any bytes as a revocation answer under any status: a 2xx is always the
+/// token revoked, anything else the server's error or refused.
+fn anyRevocation(_: void, c: *shake.Case) !void {
+    var buffer: [512]u8 = undefined;
+    const input = shake.gen.mutated(c.source, &buffer, &.{ "", "{\"error\":\"unsupported_token_type\",\"error_description\":\"no\"}" });
+    const statuses = [_]u16{ 200, 204, 400, 401, 503 };
+    const status = shake.gen.oneOf(c.source, u16, &statuses);
+    const response = oauth.revocation.readResponse(status, input, .{}) catch {
+        if (status < 300) return error.SuccessRefused;
+        return;
+    };
+    switch (response) {
+        .revoked => if (status >= 300) return error.ErrorTakenForSuccess,
+        .refused => |e| if (status < 300 or e.name.len == 0) return error.WrongRefusal,
+    }
+}
+
+test "any answer to a revocation is revoked on a 2xx, else the server's error or refused" {
+    try shake.check(std.testing.allocator, {}, anyRevocation, .{ .cases = 1000 });
+}
+
 /// Any bytes as a registration response.
 fn anyRegistration(_: void, c: *shake.Case) !void {
     var buffer: [512]u8 = undefined;

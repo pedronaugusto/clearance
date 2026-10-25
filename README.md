@@ -10,7 +10,8 @@ clearance is JWT and JOSE (JWS, JWK) and OAuth 2.1 for Zig. Two modules:
   [aegis](https://github.com/pedronaugusto/aegis) (checked types) alone.
 - `clearance.oauth`: OAuth 2.1 clients on
   [uplink](https://github.com/pedronaugusto/uplink): discovery, the
-  authorization code flow with PKCE, refresh, client credentials, MCP's
+  authorization code flow with PKCE, refresh, client credentials, device
+  authorization (RFC 8628), token revocation (RFC 7009), MCP's
   enterprise-managed authorization (an identity provider's ID-JAG redeemed
   for an access token), a workload's JWT as the grant, registration, key sets
   kept from a `jwks_uri`, introspection, a token store;

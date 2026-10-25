@@ -8,11 +8,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
-- `token.Grant` gains `device_code`, and `errors.Code` gains `authorization_pending`, `slow_down` and `expired_token`: a switch over either needs the new cases.
+- `token.Grant` gains `device_code`, and `errors.Code` gains `authorization_pending`, `slow_down`, `expired_token` and `unsupported_token_type` (which was `other`, the bearer check's introspection refusal among them): a switch over either needs the new cases.
 
 ### Added
 
 - Device authorization (RFC 8628): `oauth.device` writes the request and reads the answer into an `Authorization` (the device code in wiped memory; `verification_uri` and `verification_uri_complete` held to HTTPS or loopback, since a person is sent there; a `user_code` of at most 64 bytes with no control characters, since it is printed to a terminal; Google's `verification_url` read when `verification_uri` is absent; the interval 5 s when absent, never below 1 s); `token.Grant.device_code`; metadata's `device_authorization_endpoint`. `oauth.DeviceFlow`: `begin` asks for the codes, `poll` makes one token request (`pending`, `slow_down` with the interval grown by 5 s, the tokens, or the refusal), `wait` polls at the interval on `io`'s sleep until the person finishes, the server refuses, or the codes would expire first (`error.Expired`, nothing sent). A property over the answer; a bench row.
+- Token revocation (RFC 7009): `oauth.revocation` writes the request (the token, its `token_type_hint`, the client's authentication) and reads the answer (any 2xx is the token revoked, whatever its body; another status is the server's error, a 503 among them, never retried); metadata's `revocation_endpoint` and its auth methods; `oauth.revoke` sends it. A sign-out revokes the refresh token, which ends the grant at the server, then forgets the store's entry. A property, a bench row.
 
 ## [0.4.0] - 2026-10-21
 

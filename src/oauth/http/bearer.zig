@@ -148,7 +148,7 @@ pub const Verifier = struct {
                 // The server introspects no token of this kind (oidc-provider
                 // says so of the JWT access tokens it issues, with RFC 7009's
                 // code): the token is not shown valid here, the client's to fix.
-                if (e.code == .other and std.mem.eql(u8, e.name.slice(), "unsupported_token_type"))
+                if (e.code == .unsupported_token_type)
                     return v.refuse(.unauthorized, .invalid_token, "unsupported_token_type", null);
                 // The server refused this resource server's own credentials,
                 // or failed.
