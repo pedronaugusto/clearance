@@ -35,6 +35,9 @@ pub const id_jag = @import("oauth/id_jag.zig");
 pub const device = @import("oauth/device.zig");
 /// Token revocation (RFC 7009).
 pub const revocation = @import("oauth/revocation.zig");
+/// DPoP for a client (RFC 9449): the key its proofs are signed with and its
+/// servers' nonces; tokens bound to it.
+pub const dpop = @import("oauth/dpop.zig");
 /// Dynamic client registration (RFC 7591) and client ID metadata documents.
 pub const registration = @import("oauth/registration.zig");
 /// Token introspection (RFC 7662).
@@ -130,6 +133,7 @@ test {
     _ = id_jag;
     _ = device;
     _ = revocation;
+    _ = dpop;
     _ = registration;
     _ = introspection;
     _ = challenge;

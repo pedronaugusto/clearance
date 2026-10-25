@@ -39,6 +39,11 @@ pub const Code = enum {
     /// RFC 7009 §2.2.1: the server does not revoke (or introspect, as
     /// oidc-provider answers for its JWTs) tokens of this kind.
     unsupported_token_type,
+    /// RFC 9449 §12.2: a DPoP proof refused (`invalid_dpop_proof`), or one
+    /// without the nonce the server now asks for (`use_dpop_nonce`, its
+    /// `DPoP-Nonce` beside it).
+    invalid_dpop_proof,
+    use_dpop_nonce,
     other,
 
     pub fn parse(name: []const u8) Code {

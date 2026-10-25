@@ -233,14 +233,17 @@ test "any bytes are read as a Bearer challenge that writes back the same, or ref
 }
 
 /// Any bytes as an `Authorization` value: a token only when the value is
-/// `Bearer`, spaces, and a b64token, which is then a slice of the value.
+/// `Bearer` or `DPoP`, spaces, and a b64token, which is then a slice of the
+/// value.
 fn anyAuthorization(_: void, c: *shake.Case) !void {
     var buffer: [128]u8 = undefined;
-    const input = shake.gen.mutated(c.source, &buffer, &.{ "Bearer mF_9.B5f-4.1JqM", "bearer  abc==", "Basic dXNlcjpwdw==" });
-    switch (oauth.bearer.bearerToken(input)) {
+    const input = shake.gen.mutated(c.source, &buffer, &.{ "Bearer mF_9.B5f-4.1JqM", "bearer  abc==", "Basic dXNlcjpwdw==", "DPoP Kz~8mXK1EalYznwH-LC-1fBAo.4Ljp~zsPE_NeO.gxU" });
+    switch (oauth.bearer.credentials(input)) {
         .none, .malformed => {},
-        .token => |t| {
-            if (!std.ascii.startsWithIgnoreCase(input, "bearer ")) return error.NotBearer;
+        .token => |presented| {
+            const t = presented.token;
+            const prefix: []const u8 = if (presented.scheme == .bearer) "bearer " else "dpop ";
+            if (!std.ascii.startsWithIgnoreCase(input, prefix)) return error.WrongScheme;
             if (!std.mem.endsWith(u8, input, t)) return error.NotTheValue;
             var seen_pad = false;
             for (t) |ch| {
@@ -252,7 +255,7 @@ fn anyAuthorization(_: void, c: *shake.Case) !void {
     }
 }
 
-test "any Authorization value gives a token only as RFC 6750's b64token" {
+test "any Authorization value gives a token only as RFC 6750's b64token, Bearer or DPoP" {
     try shake.check(std.testing.allocator, {}, anyAuthorization, .{ .cases = 2000 });
 }
 

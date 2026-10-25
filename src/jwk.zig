@@ -456,6 +456,55 @@ fn bitLength(big_endian: []const u8) usize {
     return 0;
 }
 
+/// Writes a public key as a JWK: its required members (RFC 7638 §3.2), in
+/// lexicographic order. A secret (`oct`) key is not public.
+pub fn writePublic(w: *std.Io.Writer, key: Key) (std.Io.Writer.Error || error{NotPublic})!void {
+    if (key.material == .hmac) return error.NotPublic;
+    try writeRequired(w, key);
+}
+
+pub const PublicError = error{
+    /// Not one JSON object with a `kty`, or members that make no valid key.
+    InvalidKey,
+    /// A `kty` or `crv` clearance does not verify with.
+    UnsupportedKey,
+    /// Private members, or an `oct` key: not a public key.
+    NotPublic,
+    /// `use` is `enc`, or `key_ops` does not allow verifying.
+    NotForSignatures,
+    /// `alg` names an algorithm clearance does not have, or one the key
+    /// cannot use.
+    InvalidAlgorithm,
+} || std.mem.Allocator.Error;
+
+/// Reads one public JWK (a DPoP proof's `jwk`, a document's own key) into a
+/// key whose bytes live in `arena`, through the checks a key set's keys
+/// get. A key with private members or a secret one is refused, never read
+/// as public.
+pub fn readPublic(arena: std.mem.Allocator, document: []const u8, min_rsa_bits: u16) PublicError!Key {
+    const parse_options: strand.json.ParseOptions = .{ .ignore_unknown_fields = true, .limits = .{ .depth = 8 } };
+    const w = strand.json.parseLeaky(Wire, arena, document, parse_options) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.InvalidKey,
+    };
+    var why: Skip = undefined;
+    var no_secrets: Secrets = .{ .storage = &.{} };
+    const key = read(arena, w, .{ .secrets = false, .min_rsa_bits = min_rsa_bits }, &no_secrets, &why) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Skipped => return switch (why) {
+            .unsupported => error.UnsupportedKey,
+            .not_for_signatures => error.NotForSignatures,
+            .algorithm => error.InvalidAlgorithm,
+            .secret, .private => error.NotPublic,
+            // unreachable: one key, no set to share a kid with
+            .duplicate => unreachable,
+            .invalid => error.InvalidKey,
+        },
+    };
+    if (!key.verify) return error.NotForSignatures;
+    return key;
+}
+
 /// The JWK thumbprint of a key (RFC 7638): SHA-256 over its required members
 /// in lexicographic order, without whitespace.
 pub fn thumbprint(key: Key) [32]u8 {

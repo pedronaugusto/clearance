@@ -57,6 +57,10 @@ pub const Header = struct {
     kid: ?[]const u8 = null,
     typ: ?[]const u8 = null,
     cty: ?[]const u8 = null,
+    /// The header's `jwk` member as written (raw JSON), for a profile whose
+    /// token carries its own key: a DPoP proof (RFC 9449 §4.2). `verify`
+    /// never uses it to choose a key.
+    jwk: ?[]const u8 = null,
 };
 
 /// The members of a header clearance reads; any other is passed over. `crit`
@@ -67,6 +71,7 @@ const WireHeader = struct {
     kid: ?[]const u8 = null,
     typ: ?[]const u8 = null,
     cty: ?[]const u8 = null,
+    jwk: strand.json.Raw = .{ .bytes = "" },
     crit: strand.json.Raw = .{ .bytes = "" },
 };
 
@@ -94,6 +99,14 @@ pub const Check = enum {
     too_old,
     required,
     scratch,
+    /// A DPoP proof's `htm` or `htu` is not the request's.
+    request,
+    /// A proof's `ath`, or a token's `cnf`, is not what binds it.
+    binding,
+    /// A nonce the server asked for is missing or stale.
+    nonce,
+    /// A token meant for one use was seen before, or the replay set is full.
+    replay,
 };
 
 pub const Diagnostics = struct { check: Check = .none };
@@ -184,11 +197,43 @@ fn verifyParts(token: []const u8, keys: []const Key, options: Options, scratch: 
         return error.AlgorithmNotAllowed;
     };
     if (std.mem.findScalar(Algorithm, options.algorithms, alg) == null) return error.AlgorithmNotAllowed;
-    const header: Header = .{ .alg = alg, .kid = read.wire.kid, .typ = read.wire.typ, .cty = read.wire.cty };
-
+    const header = headerOf(read.wire, alg);
     const key = try select(keys, header);
     try check(key, alg, read.signing_input, read.signature, options);
     return .{ .header = header, .payload = read.payload, .key = key, .rest = read.rest };
+}
+
+fn headerOf(wire: WireHeader, alg: Algorithm) Header {
+    return .{ .alg = alg, .kid = wire.kid, .typ = wire.typ, .cty = wire.cty, .jwk = if (wire.jwk.bytes.len == 0) null else wire.jwk.bytes };
+}
+
+/// Verifies a compact JWS against the one key the caller has already
+/// chosen, its `kid` not consulted: for a token that names its own key (a
+/// DPoP proof, whose `jwk` the profile has read and checked), or a caller
+/// that holds a single key by other means. The key must fit the header's
+/// algorithm, which the options must allow.
+pub fn verifyWith(token: []const u8, key: *const Key, options: Options, scratch: []u8) VerifyError!Verified {
+    std.debug.assert(options.algorithms.len > 0);
+    var diagnostics: Diagnostics = .{};
+    defer if (options.diagnostics) |d| {
+        d.* = diagnostics;
+    };
+    return verifyOne(token, key, options, scratch, &diagnostics) catch |err| {
+        diagnostics.check = checkOf(err, diagnostics.check);
+        return err;
+    };
+}
+
+fn verifyOne(token: []const u8, key: *const Key, options: Options, scratch: []u8, diagnostics: *Diagnostics) VerifyError!Verified {
+    const read = try readParts(token, options.max_bytes, scratch, diagnostics);
+    const alg = Algorithm.parse(read.wire.alg) orelse {
+        diagnostics.check = .algorithm_unknown;
+        return error.AlgorithmNotAllowed;
+    };
+    if (std.mem.findScalar(Algorithm, options.algorithms, alg) == null) return error.AlgorithmNotAllowed;
+    if (!key.verify or !key.fits(alg)) return error.NoKey;
+    try check(key, alg, read.signing_input, read.signature, options);
+    return .{ .header = headerOf(read.wire, alg), .payload = read.payload, .key = key, .rest = read.rest };
 }
 
 /// A compact JWS split, its parts decoded and its header read, the
@@ -232,6 +277,8 @@ pub const Inspected = struct {
     kid: ?[]const u8 = null,
     typ: ?[]const u8 = null,
     cty: ?[]const u8 = null,
+    /// The header's `jwk` member, raw, as `Header.jwk`.
+    jwk: ?[]const u8 = null,
     payload: []const u8,
     /// What of the scratch buffer is still free.
     rest: []u8,
@@ -252,7 +299,7 @@ pub fn inspect(token: []const u8, max_bytes: Bytes, scratch: []u8) InspectError!
     var diagnostics: Diagnostics = .{};
     const read = try readParts(token, max_bytes, scratch, &diagnostics);
     if (read.wire.alg.len == 0 or std.ascii.eqlIgnoreCase(read.wire.alg, "none") or read.signature.len == 0) return error.Unsigned;
-    return .{ .alg = read.wire.alg, .kid = read.wire.kid, .typ = read.wire.typ, .cty = read.wire.cty, .payload = read.payload, .rest = read.rest };
+    return .{ .alg = read.wire.alg, .kid = read.wire.kid, .typ = read.wire.typ, .cty = read.wire.cty, .jwk = if (read.wire.jwk.bytes.len == 0) null else read.wire.jwk.bytes, .payload = read.payload, .rest = read.rest };
 }
 
 fn decodePart(rest: *[]u8, text: []const u8, diagnostics: *Diagnostics) ReadError![]const u8 {
@@ -371,6 +418,10 @@ pub const SignHeader = struct {
     kid: ?[]const u8 = null,
     typ: ?[]const u8 = null,
     cty: ?[]const u8 = null,
+    /// A public key written as the header's `jwk`: a token that carries the
+    /// key it is signed with (a DPoP proof, RFC 9449 §4.2; an ACME account's
+    /// first request). Only its public members are written.
+    jwk: ?*const Key = null,
 };
 
 pub const SignError = error{
@@ -389,11 +440,18 @@ pub fn sign(gpa: std.mem.Allocator, io: std.Io, out: *Writer, header: SignHeader
     defer input.deinit();
     var header_json: Writer.Allocating = .init(gpa);
     defer header_json.deinit();
+    var public_jwk: Writer.Allocating = .init(gpa);
+    defer public_jwk.deinit();
+    if (header.jwk) |key| jwk.writePublic(&public_jwk.writer, key.*) catch |err| return switch (err) {
+        error.WriteFailed => error.WriteFailed,
+        error.NotPublic => error.InvalidKey,
+    };
     strand.json.write(&header_json.writer, .{
         .alg = alg.name(),
         .typ = header.typ,
         .cty = header.cty,
         .kid = header.kid,
+        .jwk = if (header.jwk != null) strand.json.Raw{ .bytes = public_jwk.written() } else null,
     }, .{ .nulls = .omit }) catch |err| return switch (err) {
         error.WriteFailed => error.WriteFailed,
         else => error.SigningFailed,

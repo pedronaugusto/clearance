@@ -7,7 +7,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "keys", .patterns = &.{ "src/Key.zig", "src/jwk.zig" } },
     .{ .name = "JWS", .patterns = &.{"src/jws.zig"} },
     .{ .name = "JWT", .patterns = &.{"src/jwt.zig"} },
-    .{ .name = "JWT profiles", .patterns = &.{ "src/id_token.zig", "src/access_token.zig" } },
+    .{ .name = "JWT profiles", .patterns = &.{ "src/id_token.zig", "src/access_token.zig", "src/dpop.zig" } },
     .{ .name = "public", .patterns = &.{"src/clearance.zig"} },
     .{ .name = "OAuth messages", .patterns = &.{
         "src/oauth/url.zig",
@@ -22,6 +22,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/oauth/id_jag.zig",
         "src/oauth/device.zig",
         "src/oauth/revocation.zig",
+        "src/oauth/dpop.zig",
         "src/oauth/registration.zig",
         "src/oauth/introspection.zig",
         "src/oauth/challenge.zig",

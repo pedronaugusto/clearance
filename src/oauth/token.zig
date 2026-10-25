@@ -114,9 +114,23 @@ pub fn request(gpa: std.mem.Allocator, io: std.Io, client: ?client_auth.Client, 
 /// §7.1).
 pub const TokenType = enum {
     bearer,
+    /// Bound to the client's DPoP key (RFC 9449 §5): presented with a proof
+    /// of it, `oauth.dpop.Session.headers`.
+    dpop,
 
-    pub fn name(_: TokenType) []const u8 {
-        return "Bearer";
+    pub fn name(t: TokenType) []const u8 {
+        return switch (t) {
+            .bearer => "Bearer",
+            .dpop => "DPoP",
+        };
+    }
+
+    /// The type a response names, compared without case (RFC 6749 §5.1):
+    /// DPoP only when the request sent a proof.
+    fn parse(text: []const u8, dpop: bool) ?TokenType {
+        if (std.ascii.eqlIgnoreCase(text, "bearer")) return .bearer;
+        if (dpop and std.ascii.eqlIgnoreCase(text, "dpop")) return .dpop;
+        return null;
     }
 };
 
@@ -221,9 +235,10 @@ pub const TokenSet = struct {
         try scratch.init(gpa, json.len);
         defer scratch.deinit();
         const stored = strand.json.parseLeaky(Stored, scratch.allocator(), json, .{ .limits = .{ .depth = 4 } }) catch return error.InvalidResponse;
-        if (!std.ascii.eqlIgnoreCase(stored.token_type, "bearer")) return error.UnsupportedTokenType;
+        const token_type = TokenType.parse(stored.token_type, true) orelse return error.UnsupportedTokenType;
         return init(gpa, .{
             .access_token = stored.access_token,
+            .token_type = token_type,
             .expires_at = stored.expires_at,
             .refresh_token = stored.refresh_token,
             .scope = stored.scope,
@@ -256,6 +271,9 @@ pub const ReadOptions = struct {
     /// The refresh token a refresh spent: kept when the response brings no
     /// new one (RFC 6749 §6).
     previous_refresh_token: ?[]const u8 = null,
+    /// Whether the request carried a DPoP proof: a `DPoP` token type is
+    /// accepted then (RFC 9449 §5), and refused otherwise.
+    dpop: bool = false,
     max_bytes: aegis.units.Bytes(usize) = .literal("64KiB"),
 };
 
@@ -265,7 +283,7 @@ pub const ReadError = error{
     /// `access_token` or `token_type`, a member of the wrong type, a member
     /// twice.
     InvalidResponse,
-    /// `token_type` is not `Bearer`.
+    /// `token_type` is not `Bearer`, or `DPoP` after a proof was sent.
     UnsupportedTokenType,
     /// Neither a success nor an OAuth error body.
     UnexpectedStatus,
@@ -298,11 +316,11 @@ pub fn readResponse(gpa: std.mem.Allocator, status: u16, body: []const u8, optio
         .limits = .{ .depth = 16 },
     }) catch return error.InvalidResponse;
     if (wire.access_token.len == 0) return error.InvalidResponse;
-    // Compared without case (RFC 6749 §5.1).
-    if (!std.ascii.eqlIgnoreCase(wire.token_type, "bearer")) return error.UnsupportedTokenType;
+    const token_type = TokenType.parse(wire.token_type, options.dpop) orelse return error.UnsupportedTokenType;
     const now: i64 = @intCast(@divFloor(options.now.nanoseconds, std.time.ns_per_s));
     return .{ .tokens = try TokenSet.init(gpa, .{
         .access_token = wire.access_token,
+        .token_type = token_type,
         .expires_at = if (wire.expires_in) |seconds| now +| @as(i64, seconds) else null,
         .refresh_token = wire.refresh_token orelse options.previous_refresh_token,
         .scope = wire.scope orelse options.requested_scope,
@@ -360,6 +378,9 @@ test "a token response is read into a set: expiry from now, Bearer in any case, 
 test "a token response that is not one is refused" {
     const now: ReadOptions = .{ .now = .{ .nanoseconds = 0 } };
     try testing.expectError(error.UnsupportedTokenType, readResponse(testing.allocator, 200, "{\"access_token\":\"a\",\"token_type\":\"DPoP\"}", now));
+    var bound = try readResponse(testing.allocator, 200, "{\"access_token\":\"a\",\"token_type\":\"dpop\"}", .{ .now = now.now, .dpop = true });
+    defer bound.tokens.deinit();
+    try testing.expectEqual(TokenType.dpop, bound.tokens.token_type);
     try testing.expectError(error.InvalidResponse, readResponse(testing.allocator, 200, "{\"access_token\":\"a\"}", now));
     try testing.expectError(error.InvalidResponse, readResponse(testing.allocator, 200, "{\"access_token\":\"\",\"token_type\":\"Bearer\"}", now));
     try testing.expectError(error.InvalidResponse, readResponse(testing.allocator, 200, "{\"access_token\":\"a\",\"token_type\":\"Bearer\",\"expires_in\":\"3600\"}", now));

@@ -95,7 +95,7 @@ pub fn introspect(i: *Introspector, io: std.Io, http: *uplink.Client, arena: std
 
     var request = try introspection.request(i.gpa, io, i.client, token, .{ .issuer = i.issuer, .now = now });
     defer request.deinit();
-    var answer = try fetch.postForm(i.gpa, io, http, i.endpoint, &request, i.options.max_bytes, i.options.fetch);
+    var answer = try fetch.postForm(i.gpa, io, http, i.endpoint, &request, null, i.options.max_bytes, i.options.fetch);
     defer answer.deinit();
 
     const entry_arena = try i.gpa.create(std.heap.ArenaAllocator);

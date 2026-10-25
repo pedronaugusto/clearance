@@ -1,5 +1,6 @@
 //! clearance's benchmarks: JWT and JWS verification and signing per
-//! algorithm, key sets read; and OAuth's messages: a token response read
+//! algorithm, key sets read, DPoP proofs signed and verified; and OAuth's
+//! messages: a token response read
 //! into a `TokenSet`, a device authorization read (RFC 8628), a revocation request written and answered (RFC 7009), an authorization server's metadata read, an
 //! authorization URL written with its PKCE verifier and state drawn. `bay bench` runs them in ReleaseFast and
 //! writes one JSON line per row to stdout; `bay test` runs each row once with
@@ -10,7 +11,7 @@ const oauth = @import("clearance.oauth");
 const shakedown = @import("shakedown");
 const provenance = @import("preflight_bench_options");
 
-const WorkloadError = clearance.jwt.VerifyError || clearance.jwt.SignError || clearance.jwk.ParseError ||
+const WorkloadError = clearance.jwt.VerifyError || clearance.dpop.VerifyError || clearance.jwk.PrivateError || clearance.jwt.SignError || clearance.jwk.ParseError ||
     oauth.token.ReadError || oauth.device.ReadError || oauth.revocation.ReadError || oauth.client_auth.Error || oauth.metadata.ReadError || oauth.authorize.WriteError || error{Refused};
 const Row = shakedown.bench.Row(Bench, WorkloadError);
 
@@ -19,6 +20,11 @@ const ed_jwks = "{\"keys\":[{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"kid\":\"ed\",
 const ed_token = "eyJhbGciOiJFZERTQSJ9.RXhhbXBsZSBvZiBFZDI1NTE5IHNpZ25pbmc.hgyY0il_MGCjP0JzlnLWG1PPOt7-09PGcvMg3AIbQR6dWbhijcNR4ki4iylGjg5BhVsPt9g7sVvpAr_MuM0KAg";
 
 const Claims = struct { scope: []const u8 };
+
+/// RFC 7515 A.3's P-256 key: a client's DPoP key.
+const es256_private_jwk = "{\"kty\":\"EC\",\"crv\":\"P-256\",\"x\":\"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU\",\"y\":\"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0\",\"d\":\"jpsQnnGQmL-YBIffH1136cspYG6-0iY7X1fCE9-E9LI\"}";
+const dpop_htu = "https://server.example.com/token";
+const dpop_now: std.Io.Timestamp = .{ .nanoseconds = 1_800_000_000 * std.time.ns_per_s };
 
 /// A token response as a provider writes one: a JWT access token, a refresh
 /// token and the granted scope.
@@ -54,6 +60,42 @@ const Bench = struct {
     set: clearance.jwk.KeySet = undefined,
     scratch: [4096]u8 = undefined,
     sink: usize = 0,
+    private: clearance.jwk.PrivateKey = undefined,
+    proof: std.Io.Writer.Allocating = undefined,
+    verified: clearance.dpop.Verified = undefined,
+
+    fn setupDpop(b: *Bench) WorkloadError!void {
+        b.private = try clearance.jwk.PrivateKey.parse(b.gpa, es256_private_jwk, .{});
+        b.proof = .init(b.gpa);
+        const key = clearance.dpop.Key.fromJwk(&b.private, null) catch return error.InvalidKey;
+        try clearance.dpop.writeProof(b.gpa, b.io, &b.proof.writer, &key, .{ .htm = "POST", .htu = dpop_htu }, dpop_now);
+    }
+
+    fn teardownDpop(b: *Bench) WorkloadError!void {
+        b.proof.deinit();
+        b.private.deinit();
+    }
+
+    /// A DPoP proof for a token request, ES256.
+    fn signProof(b: *Bench, units: u64) WorkloadError!void {
+        const key = clearance.dpop.Key.fromJwk(&b.private, null) catch return error.InvalidKey;
+        var out: std.Io.Writer.Allocating = .init(b.gpa);
+        defer out.deinit();
+        for (0..units) |_| {
+            out.clearRetainingCapacity();
+            try clearance.dpop.writeProof(b.gpa, b.io, &out.writer, &key, .{ .htm = "POST", .htu = dpop_htu }, dpop_now);
+            b.sink +%= out.written().len;
+        }
+    }
+
+    /// The same proof verified as a token endpoint does, its key read from
+    /// its header.
+    fn verifyProof(b: *Bench, units: u64) WorkloadError!void {
+        for (0..units) |_| {
+            try clearance.dpop.verifyProof(b.io, b.proof.written(), .{ .algorithms = &.{.es256}, .htm = "POST", .htu = dpop_htu }, dpop_now, &b.scratch, &b.verified);
+            b.sink +%= b.verified.jti.len;
+        }
+    }
 
     fn setup(b: *Bench) WorkloadError!void {
         b.token = .init(b.gpa);
@@ -168,6 +210,8 @@ const rows = [_]Row{
     .{ .name = "jws/verify-eddsa", .unit = "token", .run = Bench.verifyEdDsa, .fixture = .{ .lifetime = .row, .setup = Bench.setup, .teardown = Bench.teardown } },
     .{ .name = "jwt/sign-hs256", .unit = "token", .run = Bench.signHs256, .fixture = .{ .lifetime = .row, .setup = Bench.setup, .teardown = Bench.teardown } },
     .{ .name = "jwk/parse-ed25519-set", .unit = "set", .run = Bench.parseSet },
+    .{ .name = "dpop/sign-proof-es256", .unit = "proof", .run = Bench.signProof, .fixture = .{ .lifetime = .row, .setup = Bench.setupDpop, .teardown = Bench.teardownDpop } },
+    .{ .name = "dpop/verify-proof-es256", .unit = "proof", .run = Bench.verifyProof, .fixture = .{ .lifetime = .row, .setup = Bench.setupDpop, .teardown = Bench.teardownDpop } },
     .{ .name = "oauth/read-token-response", .unit = "response", .run = Bench.readTokenResponse },
     .{ .name = "oauth/read-device-authorization", .unit = "response", .run = Bench.readDeviceAuthorization },
     .{ .name = "oauth/revocation-request", .unit = "request", .run = Bench.revokeRequest },

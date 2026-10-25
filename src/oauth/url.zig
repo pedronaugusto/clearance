@@ -41,6 +41,12 @@ pub fn issuer(text: []const u8) Error!Url {
     return u;
 }
 
+/// The scheme and authority of an endpoint URL, as written: what a DPoP
+/// nonce is kept for (RFC 9449 §8: a server's nonces are its own).
+pub fn originOf(text: []const u8) Error![]const u8 {
+    return origin(text, try endpoint(text));
+}
+
 /// The scheme and authority of `text`, which parsed as `u`.
 fn origin(text: []const u8, u: Url) []const u8 {
     const at = @intFromPtr(u.target.ptr) - @intFromPtr(text.ptr); // safe: `wire.url.parse` gives `target` as a slice of `text`

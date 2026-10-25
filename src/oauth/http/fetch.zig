@@ -9,6 +9,7 @@ const aegis = @import("aegis");
 const uplink = @import("uplink");
 const url = @import("../url.zig");
 const client_auth = @import("../client_auth.zig");
+const errors = @import("../errors.zig");
 
 pub const Bytes = aegis.units.Bytes(usize);
 
@@ -44,6 +45,8 @@ pub const Answer = struct {
 pub const SecretAnswer = struct {
     status: u16,
     body: aegis.SecretBytes,
+    /// The answer's `DPoP-Nonce` (RFC 9449 §8), when it has one that fits.
+    dpop_nonce: ?errors.Text(256) = null,
 
     pub fn deinit(a: *SecretAnswer) void {
         a.body.deinit();
@@ -80,17 +83,23 @@ pub fn get(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, target: []c
 }
 
 /// POSTs `request` (a form request with the client's credentials) to
-/// `target`, the answer read into wiped memory.
-pub fn postForm(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, target: []const u8, request: *const client_auth.FormRequest, limit: Bytes, options: Options) Error!SecretAnswer {
-    var headers: [3]uplink.Header = .{
+/// `target`, with `dpop` as its `DPoP` field when given (RFC 9449 §5), the
+/// answer read into wiped memory.
+pub fn postForm(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, target: []const u8, request: *const client_auth.FormRequest, dpop: ?[]const u8, limit: Bytes, options: Options) Error!SecretAnswer {
+    var headers: [4]uplink.Header = .{
         .{ .name = "Content-Type", .value = client_auth.FormRequest.content_type },
         .{ .name = "Accept", .value = "application/json" },
+        undefined,
         undefined,
     };
     var count: usize = 2;
     if (request.authorization) |*a| {
-        headers[2] = .{ .name = "Authorization", .value = a.expose() };
-        count = 3;
+        headers[count] = .{ .name = "Authorization", .value = a.expose() };
+        count += 1;
+    }
+    if (dpop) |proof| {
+        headers[count] = .{ .name = "DPoP", .value = proof };
+        count += 1;
     }
     return post(gpa, io, http, target, headers[0..count], request.body.expose(), limit, options);
 }
@@ -135,7 +144,11 @@ fn post(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, target: []cons
     defer response.deinit(io);
     var out = try readSecret(gpa, io, &response, limit.raw());
     errdefer out.deinit();
-    return .{ .status = @backingInt(response.status), .body = out };
+    var nonce: ?errors.Text(256) = null;
+    if (response.headers.get("dpop-nonce")) |n| if (n.len <= 256) {
+        nonce = .init(n);
+    };
+    return .{ .status = @backingInt(response.status), .body = out, .dpop_nonce = nonce };
 }
 
 /// The body into wiped memory: grown by doubling, each old buffer wiped as

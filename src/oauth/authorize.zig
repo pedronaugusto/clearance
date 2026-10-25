@@ -24,6 +24,9 @@ pub const Request = struct {
     resources: []const []const u8 = &.{},
     /// OpenID Connect's `nonce`, when an ID token is asked for.
     nonce: ?[]const u8 = null,
+    /// RFC 9449 §10: the thumbprint of the DPoP key the code will be
+    /// redeemed with, base64url.
+    dpop_jkt: ?[]const u8 = null,
     /// Any further parameters (`prompt`, `login_hint`...), written last.
     extra: []const form.Pair = &.{},
 };
@@ -48,6 +51,7 @@ pub fn writeUrl(w: *std.Io.Writer, endpoint: []const u8, request: Request) Write
     if (request.scope) |scope| try param(w, &separator, .{ .name = "scope", .value = scope });
     for (request.resources) |resource| try param(w, &separator, .{ .name = "resource", .value = resource });
     if (request.nonce) |nonce| try param(w, &separator, .{ .name = "nonce", .value = nonce });
+    if (request.dpop_jkt) |jkt| try param(w, &separator, .{ .name = "dpop_jkt", .value = jkt });
     for (request.extra) |pair| try param(w, &separator, pair);
 }
 

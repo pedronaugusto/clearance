@@ -6,8 +6,12 @@ const std = @import("std");
 const wire = @import("uplink.wire");
 const errors = @import("errors.zig");
 
-/// A Bearer challenge's parameters.
+/// A Bearer challenge's parameters, or a DPoP challenge's (RFC 9449 §7.1),
+/// which has the same ones and `algs`.
 pub const Bearer = struct {
+    /// The scheme written: `Bearer`, or `DPoP` for a resource that takes
+    /// DPoP-bound tokens.
+    scheme: Scheme = .bearer,
     realm: ?[]const u8 = null,
     /// `invalid_request` (400), `invalid_token` (401) or
     /// `insufficient_scope` (403); null when the request had no token.
@@ -18,6 +22,21 @@ pub const Bearer = struct {
     scope: ?[]const u8 = null,
     /// RFC 9728 §5.1: where the resource's metadata is.
     resource_metadata: ?[]const u8 = null,
+    /// RFC 9449 §7.1: the DPoP algorithms the resource accepts,
+    /// space-separated; written for `DPoP` only.
+    algs: ?[]const u8 = null,
+
+    pub const Scheme = enum {
+        bearer,
+        dpop,
+
+        pub fn name(s: Scheme) []const u8 {
+            return switch (s) {
+                .bearer => "Bearer",
+                .dpop => "DPoP",
+            };
+        }
+    };
 };
 
 pub const ReadError = error{
@@ -29,16 +48,25 @@ pub const ReadError = error{
 /// The first Bearer challenge in a response's `WWW-Authenticate` values, or
 /// null when none is Bearer. Strings live in `arena`.
 pub fn read(arena: std.mem.Allocator, values: []const []const u8) ReadError!?Bearer {
+    return readScheme(arena, values, .bearer);
+}
+
+/// The first challenge of `scheme` (Bearer, or DPoP: RFC 9449 §7.1) in a
+/// response's `WWW-Authenticate` values, or null when there is none.
+/// Strings live in `arena`.
+pub fn readScheme(arena: std.mem.Allocator, values: []const []const u8, scheme: Bearer.Scheme) ReadError!?Bearer {
     for (values) |value| {
         const challenges = try wire.auth.parse(arena, value);
         for (challenges) |c| {
-            if (c.scheme != .bearer) continue;
+            if (!std.ascii.eqlIgnoreCase(c.name, scheme.name())) continue;
             var b: Bearer = .{
+                .scheme = scheme,
                 .realm = c.param("realm"),
                 .error_description = c.param("error_description"),
                 .error_uri = c.param("error_uri"),
                 .scope = c.param("scope"),
                 .resource_metadata = c.param("resource_metadata"),
+                .algs = c.param("algs"),
             };
             if (c.param("error")) |name| b.@"error" = errors.Code.parse(name);
             return b;
@@ -58,7 +86,7 @@ pub const WriteError = std.Io.Writer.Error || error{
 /// Writes the `WWW-Authenticate` value of `challenge`: `Bearer` and its
 /// parameters, quoted.
 pub fn write(w: *std.Io.Writer, challenge: Bearer) WriteError!void {
-    try w.writeAll("Bearer");
+    try w.writeAll(challenge.scheme.name());
     var first = true;
     if (challenge.realm) |v| try param(w, &first, "realm", v);
     if (challenge.@"error") |code| {
@@ -69,6 +97,7 @@ pub fn write(w: *std.Io.Writer, challenge: Bearer) WriteError!void {
     if (challenge.error_uri) |v| try param(w, &first, "error_uri", v);
     if (challenge.scope) |v| try param(w, &first, "scope", v);
     if (challenge.resource_metadata) |v| try param(w, &first, "resource_metadata", v);
+    if (challenge.scheme == .dpop) if (challenge.algs) |v| try param(w, &first, "algs", v);
 }
 
 fn param(w: *std.Io.Writer, first: *bool, name: []const u8, value: []const u8) WriteError!void {
@@ -128,6 +157,9 @@ test "a Bearer challenge is read among others, its error and metadata kept" {
     try testing.expectEqual(@as(?errors.Code, null), bare.@"error");
     try testing.expectEqual(@as(?Bearer, null), try read(arena.allocator(), &.{"Basic realm=\"x\""}));
     try testing.expectError(error.MalformedChallenge, read(arena.allocator(), &.{"Bearer error=\"x"}));
+    const dpop = (try readScheme(arena.allocator(), &.{"Bearer, DPoP error=\"use_dpop_nonce\", algs=\"ES256\""}, .dpop)).?;
+    try testing.expectEqual(errors.Code.use_dpop_nonce, dpop.@"error".?);
+    try testing.expectEqualStrings("ES256", dpop.algs.?);
 }
 
 test "a challenge is written quoted, and refuses what it cannot quote" {
@@ -141,6 +173,9 @@ test "a challenge is written quoted, and refuses what it cannot quote" {
     w = .fixed(&buffer);
     try write(&w, .{});
     try testing.expectEqualStrings("Bearer", w.buffered());
+    w = .fixed(&buffer);
+    try write(&w, .{ .scheme = .dpop, .@"error" = .use_dpop_nonce, .algs = "ES256 EdDSA" });
+    try testing.expectEqualStrings("DPoP error=\"use_dpop_nonce\", algs=\"ES256 EdDSA\"", w.buffered());
     try testing.expectError(error.InvalidValue, write(&w, .{ .error_description = "say \"hi\"" }));
     try testing.expectError(error.InvalidError, write(&w, .{ .@"error" = .other }));
     // What is written reads back.

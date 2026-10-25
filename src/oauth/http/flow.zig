@@ -18,6 +18,8 @@ const id_jag = @import("../id_jag.zig");
 const device = @import("../device.zig");
 const revocation = @import("../revocation.zig");
 const store = @import("../store.zig");
+const dpop = @import("../dpop.zig");
+const errors = @import("../errors.zig");
 const fetch = @import("fetch.zig");
 
 const Server = metadata.AuthorizationServer;
@@ -31,6 +33,9 @@ pub const TokenOptions = struct {
     extra: []const form.Pair = &.{},
     max_bytes: fetch.Bytes = .literal("64KiB"),
     fetch: fetch.Options = .{},
+    /// The client's DPoP session: every token request carries a proof of its
+    /// key, and the tokens come back bound to it (RFC 9449 §5).
+    dpop: ?*dpop.Session = null,
 };
 
 pub const TokenError = fetch.Error || client_auth.Error || token.ReadError || error{
@@ -57,6 +62,7 @@ pub fn requestToken(
         .now = sent.at,
         .requested_scope = read.requested_scope,
         .previous_refresh_token = read.previous_refresh_token,
+        .dpop = options.dpop != null,
         .max_bytes = options.max_bytes,
     });
 }
@@ -71,10 +77,34 @@ const Sent = struct {
 
 fn send(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, server: *const Server, client: ?Client, grant: token.Grant, options: TokenOptions) (fetch.Error || client_auth.Error || error{NoTokenEndpoint})!Sent {
     const endpoint = server.token_endpoint orelse return error.NoTokenEndpoint;
-    const now = std.Io.Clock.real.now(io);
-    var request = try token.request(gpa, io, client, grant, .{ .resources = options.resources, .extra = options.extra }, .{ .issuer = server.issuer, .now = now });
-    defer request.deinit();
-    return .{ .answer = try fetch.postForm(gpa, io, http, endpoint, &request, options.max_bytes, options.fetch), .at = now };
+    var attempt: u8 = 0;
+    while (true) : (attempt += 1) {
+        const now = std.Io.Clock.real.now(io);
+        // Built again for a second attempt: a client assertion's `jti` is
+        // spent by the first.
+        var request = try token.request(gpa, io, client, grant, .{ .resources = options.resources, .extra = options.extra }, .{ .issuer = server.issuer, .now = now });
+        defer request.deinit();
+        var proof: std.Io.Writer.Allocating = .init(gpa);
+        defer proof.deinit();
+        if (options.dpop) |session| try session.proof(gpa, io, &proof.writer, "POST", endpoint, null);
+        var answer = try fetch.postForm(gpa, io, http, endpoint, &request, if (options.dpop != null) proof.written() else null, options.max_bytes, options.fetch);
+        const session = options.dpop orelse return .{ .answer = answer, .at = now };
+        if (answer.dpop_nonce) |*n| session.remember(io, endpoint, n.slice());
+        // The server asks for its nonce (RFC 9449 §8): sent once more with it.
+        if (attempt == 0 and answer.dpop_nonce != null and answer.status == 400 and isNonceError(answer.body.expose())) {
+            answer.deinit();
+            continue;
+        }
+        return .{ .answer = answer, .at = now };
+    }
+}
+
+/// Whether an error body is `use_dpop_nonce`.
+fn isNonceError(body: []const u8) bool {
+    if (body.len > 4096) return false;
+    var scratch: [1024]u8 = undefined;
+    const e = errors.readJson(body, &scratch) orelse return false;
+    return e.code == .use_dpop_nonce;
 }
 
 /// Tokens for a JWT presented as the grant (RFC 7523 §2.1): a workload's
@@ -125,12 +155,16 @@ pub fn redeemIdJag(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, ser
 pub const RefreshError = TokenError || error{
     /// The set has no refresh token.
     NoRefreshToken,
+    /// The set's tokens are bound to a DPoP key and the options carry no
+    /// session: the server would refuse the refresh (RFC 9449 §5).
+    DpopRequired,
 };
 
 /// New tokens for `set`'s refresh token, asking for the scope it was
 /// granted (RFC 6749 §6: a refresh keeps the grant's scope). An answer
 /// without a refresh token keeps `set`'s.
 pub fn refresh(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, server: *const Server, client: Client, set: *const TokenSet, options: TokenOptions) RefreshError!token.Response {
+    if (set.token_type == .dpop and options.dpop == null) return error.DpopRequired;
     const refresh_token = set.refresh_token orelse return error.NoRefreshToken;
     return requestToken(gpa, io, http, server, client, .{ .refresh_token = .{ .refresh_token = refresh_token } }, .{
         .requested_scope = set.scope,
@@ -170,6 +204,10 @@ pub const AuthorizationFlow = struct {
         /// OAuth 2.1 lets a server leave the list out, and PKCE is sent
         /// either way).
         require_pkce_listed: bool = false,
+        /// The DPoP session the code will be redeemed with: the request
+        /// carries its thumbprint (`dpop_jkt`, RFC 9449 §10), binding the
+        /// code to its key. `finish` then needs the session in its options.
+        dpop: ?*const dpop.Session = null,
         extra: []const form.Pair = &.{},
     };
 
@@ -200,6 +238,12 @@ pub const AuthorizationFlow = struct {
             pkce.random(io, &nonce);
             flow.nonce = nonce;
         }
+        var jkt: [43]u8 = undefined;
+        if (request.dpop) |session| {
+            var jw: std.Io.Writer = .fixed(&jkt);
+            // unreachable: a SHA-256 is 43 base64url characters
+            clearance.base64url.encode(&jw, &session.thumbprint()) catch unreachable;
+        }
         try authorize.writeUrl(w, endpoint, .{
             .client_id = request.client_id,
             .redirect_uri = request.redirect_uri,
@@ -208,6 +252,7 @@ pub const AuthorizationFlow = struct {
             .scope = request.scope,
             .resources = request.resources,
             .nonce = if (flow.nonce) |*n| n else null,
+            .dpop_jkt = if (request.dpop != null) &jkt else null,
             .extra = request.extra,
         });
         return flow;
@@ -304,7 +349,7 @@ pub const DeviceFlow = struct {
         const now = std.Io.Clock.real.now(io);
         var form_request = try device.request(gpa, io, client, request, .{ .issuer = server.issuer, .now = now });
         defer form_request.deinit();
-        var answer = try fetch.postForm(gpa, io, http, endpoint, &form_request, options.max_bytes, options.fetch);
+        var answer = try fetch.postForm(gpa, io, http, endpoint, &form_request, null, options.max_bytes, options.fetch);
         defer answer.deinit();
         return switch (try device.readAuthorization(gpa, answer.status, answer.body.expose(), .{ .now = now, .max_bytes = options.max_bytes })) {
             .authorization => |a| .{ .flow = .{ .authorization = a, .scope = request.scope, .resources = request.resources } },
@@ -390,7 +435,7 @@ pub fn revoke(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, server: 
     const endpoint = server.revocation_endpoint orelse return error.NoRevocationEndpoint;
     var request = try revocation.request(gpa, io, client, token_text, hint, .{ .issuer = server.issuer, .now = std.Io.Clock.real.now(io) });
     defer request.deinit();
-    var answer = try fetch.postForm(gpa, io, http, endpoint, &request, options.max_bytes, options.fetch);
+    var answer = try fetch.postForm(gpa, io, http, endpoint, &request, null, options.max_bytes, options.fetch);
     defer answer.deinit();
     return revocation.readResponse(answer.status, answer.body.expose(), .{ .max_bytes = options.max_bytes });
 }

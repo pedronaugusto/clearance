@@ -323,6 +323,91 @@ fn strip(media: []const u8) []const u8 {
     return media;
 }
 
+/// Where the identifiers of tokens meant to be used once (a DPoP proof's
+/// `jti`, a logout token's) are kept while those tokens could still be
+/// accepted, so a token replayed within its life is refused. The caller
+/// names an identifier by a hash (`replayId`), never the token's text.
+pub const Replay = struct {
+    context: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        record: *const fn (context: *anyopaque, io: std.Io, id: [32]u8, until: i64, now: i64) RecordError!bool,
+    };
+
+    pub const RecordError = error{
+        /// Every place is held by an identifier still in its life: refusing
+        /// is the only safe answer (forgetting one would let it be replayed).
+        Full,
+    };
+
+    /// Records `id` as seen until `until` (seconds since the epoch): true
+    /// the first time, false when it is already held and `now` is before
+    /// its end.
+    pub fn record(r: Replay, io: std.Io, id: [32]u8, until: i64, now: i64) RecordError!bool {
+        return r.vtable.record(r.context, io, id, until, now);
+    }
+};
+
+/// The identifier a replay set keeps for a token: SHA-256 over the scope it
+/// is unique in (the key that signed it, its issuer) and its own id, so one
+/// party's identifiers never collide with another's.
+pub fn replayId(scope: []const u8, id: []const u8) [32]u8 {
+    var h: std.crypto.hash.sha2.Sha256 = .init(.{});
+    var length: [8]u8 = undefined;
+    std.mem.writeInt(u64, &length, scope.len, .big);
+    h.update(&length);
+    h.update(scope);
+    h.update(id);
+    return h.finalResult();
+}
+
+/// A replay set in memory, of a fixed number of places taken when it is
+/// made: recording never allocates. Safe to share between tasks.
+pub const MemoryReplay = struct {
+    gpa: std.mem.Allocator,
+    mutex: std.Io.Mutex = .init,
+    /// Guarded by `mutex`: each identifier and the second its life ends.
+    entries: std.array_hash_map.Auto([32]u8, i64) = .empty,
+    capacity: u32,
+
+    pub fn init(gpa: std.mem.Allocator, capacity: u32) std.mem.Allocator.Error!MemoryReplay {
+        var m: MemoryReplay = .{ .gpa = gpa, .capacity = capacity };
+        try m.entries.ensureTotalCapacity(gpa, capacity);
+        return m;
+    }
+
+    pub fn deinit(m: *MemoryReplay) void {
+        m.entries.deinit(m.gpa);
+        m.* = undefined;
+    }
+
+    pub fn replay(m: *MemoryReplay) Replay {
+        return .{ .context = m, .vtable = &.{ .record = record } };
+    }
+
+    fn record(context: *anyopaque, io: std.Io, id: [32]u8, until: i64, now: i64) Replay.RecordError!bool {
+        const m: *MemoryReplay = @ptrCast(@alignCast(context)); // safe: the vtable is only ever handed out with a *MemoryReplay
+        m.mutex.lockUncancelable(io);
+        defer m.mutex.unlock(io);
+        if (m.entries.getPtr(id)) |end| {
+            if (now < end.*) return false;
+            end.* = until;
+            return true;
+        }
+        if (m.entries.count() >= m.capacity) {
+            var i: usize = 0;
+            while (i < m.entries.count()) {
+                if (m.entries.values()[i] <= now) m.entries.swapRemoveAt(i) else i += 1;
+            }
+            if (m.entries.count() >= m.capacity) return error.Full;
+        }
+        // Within the capacity taken at `init`: no allocation.
+        m.entries.putAssumeCapacity(id, until);
+        return true;
+    }
+};
+
 pub const SignError = jws.SignError || error{InvalidClaims};
 
 /// Writes `claims` (any value strand writes as a JSON object) as a JWT signed
@@ -337,6 +422,23 @@ pub fn sign(gpa: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, header: jws
     var with_type = header;
     if (with_type.typ == null) with_type.typ = "JWT";
     try jws.sign(gpa, io, out, with_type, payload.written(), signer);
+}
+
+test "a replay set refuses an identifier within its life, takes it again after, and refuses when full" {
+    var m: MemoryReplay = try .init(std.testing.allocator, 2);
+    defer m.deinit();
+    const r = m.replay();
+    const io = std.testing.io;
+    const a = replayId("key-a", "j1");
+    try std.testing.expect(!std.mem.eql(u8, &a, &replayId("key-b", "j1")));
+    try std.testing.expect(!std.mem.eql(u8, &replayId("ab", "c"), &replayId("a", "bc")));
+    try std.testing.expect(try r.record(io, a, 100, 10));
+    try std.testing.expect(!try r.record(io, a, 100, 99));
+    try std.testing.expect(try r.record(io, a, 200, 100));
+    try std.testing.expect(try r.record(io, replayId("key-a", "j2"), 150, 100));
+    try std.testing.expectError(error.Full, r.record(io, replayId("key-a", "j3"), 150, 120));
+    // Past the second identifier's end its place is free.
+    try std.testing.expect(try r.record(io, replayId("key-a", "j3"), 300, 150));
 }
 
 test {

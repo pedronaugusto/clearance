@@ -7,6 +7,7 @@ const aegis = @import("aegis");
 const strand = @import("strand");
 const client_auth = @import("client_auth.zig");
 const errors = @import("errors.zig");
+const base64url = @import("clearance").base64url;
 
 /// The introspection request for `token` (RFC 7662 §2.1).
 pub fn request(gpa: std.mem.Allocator, io: std.Io, client: client_auth.Client, token: []const u8, context: client_auth.Context) client_auth.Error!client_auth.FormRequest {
@@ -32,9 +33,15 @@ pub const Introspection = struct {
     aud: []const []const u8 = &.{},
     iss: ?[]const u8 = null,
     jti: ?[]const u8 = null,
-    /// Whether the token is bound to a key (`cnf`, RFC 7800): a DPoP or mTLS
-    /// token, whose binding clearance does not check.
+    /// Whether the token is bound (`cnf`, RFC 7800): a DPoP or mTLS token,
+    /// usable only with the binding proved.
     bound: bool = false,
+    /// The DPoP key's thumbprint the binding names (`cnf.jkt`, RFC 9449
+    /// §6.2), when it names one that decodes to SHA-256's length.
+    jkt: ?[32]u8 = null,
+    /// The client certificate's SHA-256 (`cnf`'s `x5t#S256`, RFC 8705
+    /// §3.2), likewise.
+    x5t_s256: ?[32]u8 = null,
 
     /// Whether `aud` contains `value`.
     pub fn hasAudience(i: *const Introspection, value: []const u8) bool {
@@ -93,6 +100,12 @@ pub fn readResponse(arena: std.mem.Allocator, status: u16, body: []const u8, opt
     };
     if (!wire.active) return .{ .introspected = .{ .active = false } };
     var i: Introspection = .{ .active = true, .bound = wire.cnf != null };
+    if (wire.cnf) |raw| {
+        const Confirmation = struct { jkt: ?[]const u8 = null, @"x5t#S256": ?[]const u8 = null };
+        const c = raw.parse(Confirmation, arena, opts) catch return error.InvalidResponse;
+        i.jkt = digest(c.jkt);
+        i.x5t_s256 = digest(c.@"x5t#S256");
+    }
     inline for (.{ "scope", "client_id", "username", "token_type", "exp", "iat", "nbf", "sub", "iss", "jti" }) |name| {
         @field(i, name) = @field(wire, name);
     }
@@ -104,6 +117,14 @@ pub fn readResponse(arena: std.mem.Allocator, status: u16, body: []const u8, opt
         }
     }
     return .{ .introspected = i };
+}
+
+/// A base64url SHA-256 digest, or null when it is absent or not one.
+fn digest(text: ?[]const u8) ?[32]u8 {
+    var out: [32]u8 = undefined;
+    const decoded = base64url.decode(&out, text orelse return null) catch return null;
+    if (decoded.len != 32) return null;
+    return out;
 }
 
 const testing = std.testing;
@@ -125,6 +146,10 @@ test "RFC 7662 §2.2's answer is read, its audience one or several" {
     const several = try readResponse(a, 200, "{\"active\":true,\"aud\":[\"a\",\"b\"],\"cnf\":{\"jkt\":\"x\"}}", .{});
     try testing.expect(several.introspected.hasAudience("b"));
     try testing.expect(several.introspected.bound);
+    try testing.expectEqual(@as(?[32]u8, null), several.introspected.jkt);
+    const bound = try readResponse(a, 200, "{\"active\":true,\"cnf\":{\"jkt\":\"0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I\"}}", .{});
+    try testing.expect(bound.introspected.jkt != null);
+    try testing.expectError(error.InvalidResponse, readResponse(a, 200, "{\"active\":true,\"cnf\":{\"jkt\":7}}", .{}));
     const inactive = try readResponse(a, 200, "{\"active\":false,\"scope\":\"x\"}", .{});
     try testing.expect(!inactive.introspected.active);
     try testing.expectEqual(@as(?[]const u8, null), inactive.introspected.scope);

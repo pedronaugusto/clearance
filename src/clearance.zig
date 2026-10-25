@@ -18,6 +18,8 @@ pub const jwt = @import("jwt.zig");
 pub const id_token = @import("id_token.zig");
 /// JWT access tokens (RFC 9068), checked by the resource server they are for.
 pub const access_token = @import("access_token.zig");
+/// DPoP proofs (RFC 9449): written by a client, verified by a server.
+pub const dpop = @import("dpop.zig");
 
 test {
     if (builtin.is_test) _ = @import("tests.zig");

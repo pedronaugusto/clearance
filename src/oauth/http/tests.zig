@@ -46,6 +46,7 @@ const Provider = struct {
     device_answers: []const []const u8 = &.{"{\"access_token\":\"dev-at\",\"token_type\":\"Bearer\",\"expires_in\":600}"},
     device_polls: u32 = 0,
     device_expires_in: u32 = 600,
+    dpop_requests: u32 = 0,
     revoked_buffer: [32]u8 = undefined,
     revoked: []const u8 = "",
 
@@ -201,6 +202,7 @@ const Provider = struct {
         defer p.mutex.unlock(io);
         p.token_requests += 1;
         const grant = field(arena, body, "grant_type") orelse "";
+        if (request.headers.get("dpop")) |proof| return p.dpopToken(io, arena, proof, grant, body, response);
         if (std.mem.eql(u8, grant, "authorization_code")) {
             const verifier = field(arena, body, "code_verifier") orelse "";
             const expected = oauth.pkce.challengeOf(verifier);
@@ -311,6 +313,40 @@ const Provider = struct {
         const scope = field(arena, body, "scope") orelse "";
         if (oauth.challenge.contains(scope, "wif.rejected")) return refuse(io, response, "invalid_scope");
         return response.send(io, "{\"access_token\":\"wif-at\",\"token_type\":\"Bearer\",\"expires_in\":600}");
+    }
+
+    /// A token request with a DPoP proof (RFC 9449 §5): the proof checked
+    /// for this endpoint with the server's nonce (a proof without it is
+    /// answered `use_dpop_nonce` and the nonce), then an RFC 9068 access
+    /// token bound to the proof's key for the public client `dpop-app`.
+    fn dpopToken(p: *Provider, io: Io, arena: std.mem.Allocator, proof: []const u8, grant: []const u8, body: []const u8, response: *uplink.server.Response) !void {
+        p.dpop_requests += 1;
+        const scratch = try arena.alloc(u8, clearance.jws.scratchLength(proof.len));
+        const verified = try arena.create(clearance.dpop.Verified);
+        const htu = try std.mem.concat(arena, u8, &.{ p.base, "/token" });
+        const now = Io.Clock.real.now(io);
+        clearance.dpop.verifyProof(io, proof, .{ .algorithms = &.{ .es256, .eddsa }, .htm = "POST", .htu = htu, .nonce = "as-nonce-1" }, now, scratch, verified) catch |err| {
+            if (err != error.UseNonce) return refuse(io, response, "invalid_dpop_proof");
+            try response.header("DPoP-Nonce", "as-nonce-1");
+            return refuse(io, response, "use_dpop_nonce");
+        };
+        if (!std.mem.eql(u8, grant, "client_credentials") or !std.mem.eql(u8, field(arena, body, "client_id") orelse "", "dpop-app")) return refuse(io, response, "invalid_grant");
+        var jkt: std.Io.Writer.Allocating = .init(arena);
+        try clearance.base64url.encode(&jkt.writer, &verified.thumbprint);
+        const seconds: i64 = @intCast(@divFloor(now.nanoseconds, std.time.ns_per_s));
+        var at: std.Io.Writer.Allocating = .init(arena);
+        try signTyped(arena, io, &at.writer, "k1", "at+jwt", .{
+            .iss = "https://as.example",
+            .aud = "https://rs.example/mcp",
+            .sub = "dpop-app",
+            .client_id = "dpop-app",
+            .scope = "mcp",
+            .exp = seconds + 600,
+            .iat = seconds,
+            .jti = "dpop-j1",
+            .cnf = .{ .jkt = jkt.written() },
+        });
+        return response.send(io, try arena.print("{{\"access_token\":\"{s}\",\"token_type\":\"DPoP\",\"expires_in\":600}}", .{at.written()}));
     }
 
     fn refuse(io: Io, response: *uplink.server.Response, code: []const u8) !void {
@@ -559,6 +595,90 @@ test "revocation: the refresh token revoked, then the store forgets it; a refusa
     try testing.expectError(error.UnexpectedStatus, oauth.revoke(gpa, io, &http, &server.value, app, "busy", null, .{}));
 }
 
+/// RFC 7515 A.3's P-256 key, the client's DPoP key.
+const es256_private_jwk = "{\"kty\":\"EC\",\"crv\":\"P-256\",\"x\":\"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU\",\"y\":\"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0\",\"d\":\"jpsQnnGQmL-YBIffH1136cspYG6-0iY7X1fCE9-E9LI\"}";
+
+test "DPoP: the server's nonce learned and sent again, a bound token, its proof checked by the resource; replay and a bearer downgrade refused" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var p: Provider = undefined;
+    try p.start(io);
+    defer p.stop(io);
+    var http: uplink.Client = .init(gpa, .{});
+    defer http.deinit(io);
+    var server = try oauth.discover(gpa, io, &http, p.base, .{});
+    defer server.deinit();
+    var private = try clearance.jwk.PrivateKey.parse(gpa, es256_private_jwk, .{});
+    defer private.deinit();
+    var session: oauth.dpop.Session = .init(try .fromJwk(&private, null));
+
+    // The first proof has no nonce: answered with one, sent again once.
+    var response = try oauth.clientCredentials(gpa, io, &http, &server.value, .{ .id = "dpop-app" }, null, .{ .dpop = &session });
+    defer response.tokens.deinit();
+    const set = &response.tokens;
+    try testing.expectEqual(oauth.token.TokenType.dpop, set.token_type);
+    try testing.expectEqual(@as(u32, 2), p.dpop_requests);
+    // The nonce is kept: the next request needs one try.
+    var again = try oauth.clientCredentials(gpa, io, &http, &server.value, .{ .id = "dpop-app" }, null, .{ .dpop = &session });
+    again.tokens.deinit();
+    try testing.expectEqual(@as(u32, 3), p.dpop_requests);
+    // A DPoP token refreshes only with its key.
+    try testing.expectError(error.DpopRequired, oauth.refresh(gpa, io, &http, &server.value, .{ .id = "dpop-app" }, set, .{}));
+    // Without a proof the server's DPoP answer would be refused, and a
+    // bearer answer to a proof is a bearer token.
+    try testing.expectError(error.UnsupportedTokenType, oauth.token.readResponse(gpa, 200, "{\"access_token\":\"a\",\"token_type\":\"DPoP\"}", .{ .now = Io.Clock.real.now(io) }));
+
+    var buffer: [128]u8 = undefined;
+    var keys = try oauth.RemoteKeySet.init(gpa, p.url(&buffer, "/jwks"), .{});
+    defer keys.deinit();
+    var replay: clearance.jwt.MemoryReplay = try .init(gpa, 64);
+    defer replay.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var verifier: oauth.bearer.Verifier = .{
+        .source = .{ .keys = .{ .set = &keys, .algorithms = &.{.eddsa} } },
+        .issuer = "https://as.example",
+        .resource = "https://rs.example/mcp",
+        .dpop = .{ .algorithms = &.{ .es256, .eddsa }, .replay = replay.replay() },
+    };
+    const target = "https://rs.example/mcp";
+    var h = try session.headers(gpa, io, "GET", target, set);
+    defer h.deinit();
+    const allowed = try verifier.check(io, &http, arena, .{ .authorization = h.authorization.expose(), .dpop = &.{h.dpop}, .method = "GET", .url = target }, &.{"mcp"});
+    try testing.expectEqualSlices(u8, &session.thumbprint(), &allowed.allowed.jkt.?);
+
+    // The same proof again, a proof for another request, none, or the
+    // bound token sent as a bearer token: each refused.
+    const replayed = (try verifier.check(io, &http, arena, .{ .authorization = h.authorization.expose(), .dpop = &.{h.dpop}, .method = "GET", .url = target }, &.{})).refused;
+    try testing.expectEqual(oauth.errors.Code.invalid_dpop_proof, replayed.dpop.?.@"error".?);
+    var other = try session.headers(gpa, io, "POST", target, set);
+    defer other.deinit();
+    const wrong = (try verifier.check(io, &http, arena, .{ .authorization = other.authorization.expose(), .dpop = &.{other.dpop}, .method = "GET", .url = target }, &.{})).refused;
+    try testing.expectEqual(std.http.Status.unauthorized, wrong.status);
+    const missing = (try verifier.check(io, &http, arena, .{ .authorization = h.authorization.expose(), .method = "GET", .url = target }, &.{})).refused;
+    try testing.expectEqual(oauth.errors.Code.invalid_dpop_proof, missing.dpop.?.@"error".?);
+    const bearer_value = try std.mem.concat(arena, u8, &.{ "Bearer ", set.access_token });
+    const downgraded = (try verifier.check(io, &http, arena, .{ .authorization = bearer_value, .method = "GET", .url = target }, &.{})).refused;
+    try testing.expectEqual(oauth.errors.Code.invalid_token, downgraded.challenge.@"error".?);
+    var out: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&out);
+    try downgraded.write(&w);
+    try testing.expectEqualStrings("Bearer error=\"invalid_token\", error_description=\"binding\", DPoP algs=\"ES256 EdDSA\"", w.buffered());
+
+    // The resource asks for its nonce: refused with it, accepted once the
+    // session sends it.
+    verifier.dpop.?.nonce = "rs-nonce-7";
+    var first = try session.headers(gpa, io, "GET", target, set);
+    defer first.deinit();
+    const asked = (try verifier.check(io, &http, arena, .{ .authorization = first.authorization.expose(), .dpop = &.{first.dpop}, .method = "GET", .url = target }, &.{})).refused;
+    try testing.expectEqual(oauth.errors.Code.use_dpop_nonce, asked.dpop.?.@"error".?);
+    session.remember(io, target, asked.dpop_nonce.?);
+    var second = try session.headers(gpa, io, "GET", target, set);
+    defer second.deinit();
+    _ = (try verifier.check(io, &http, arena, .{ .authorization = second.authorization.expose(), .dpop = &.{second.dpop}, .method = "GET", .url = target }, &.{})).allowed;
+}
+
 test "registration with an initial access token" {
     const gpa = testing.allocator;
     const io = testing.io;
@@ -798,32 +918,32 @@ test "a resource server's bearer check: JWT access tokens with the key set, or i
     try token.writer.writeAll("Bearer ");
     try signClaims(gpa, io, &token.writer, "k1", .{ .iss = "https://as.example", .aud = "https://rs.example/mcp", .sub = "u1", .client_id = "app", .scope = "mcp files:read", .exp = now + 600, .iat = now, .jti = "j1" });
 
-    const allowed = try verifier.check(io, &http, arena, token.written(), &.{"files:read"});
+    const allowed = try verifier.check(io, &http, arena, .{ .authorization = token.written() }, &.{"files:read"});
     try testing.expectEqualStrings("u1", allowed.allowed.subject.?);
     try testing.expectEqualStrings("app", allowed.allowed.client_id.?);
 
-    const forbidden = (try verifier.check(io, &http, arena, token.written(), &.{ "files:read", "files:write" })).refused;
+    const forbidden = (try verifier.check(io, &http, arena, .{ .authorization = token.written() }, &.{ "files:read", "files:write" })).refused;
     try testing.expectEqual(std.http.Status.forbidden, forbidden.status);
     var out: [256]u8 = undefined;
     var w: std.Io.Writer = .fixed(&out);
     try forbidden.write(&w);
     try testing.expectEqualStrings("Bearer error=\"insufficient_scope\", scope=\"files:read files:write\", resource_metadata=\"https://rs.example/.well-known/oauth-protected-resource/mcp\"", w.buffered());
 
-    const anonymous = (try verifier.check(io, &http, arena, null, &.{})).refused;
+    const anonymous = (try verifier.check(io, &http, arena, .{ .authorization = null }, &.{})).refused;
     try testing.expectEqual(std.http.Status.unauthorized, anonymous.status);
     try testing.expectEqual(@as(?oauth.errors.Code, null), anonymous.challenge.@"error");
     try testing.expectEqualStrings(verifier.resource_metadata.?, anonymous.challenge.resource_metadata.?);
-    const malformed = (try verifier.check(io, &http, arena, "Bearer a b", &.{})).refused;
+    const malformed = (try verifier.check(io, &http, arena, .{ .authorization = "Bearer a b" }, &.{})).refused;
     try testing.expectEqual(std.http.Status.bad_request, malformed.status);
 
     // A token for another resource is refused here, as is a forged one.
     token.clearRetainingCapacity();
     try token.writer.writeAll("Bearer ");
     try signClaims(gpa, io, &token.writer, "k1", .{ .iss = "https://as.example", .aud = "https://other.example", .sub = "u1", .client_id = "app", .exp = now + 600, .iat = now, .jti = "j2" });
-    const elsewhere = (try verifier.check(io, &http, arena, token.written(), &.{})).refused;
+    const elsewhere = (try verifier.check(io, &http, arena, .{ .authorization = token.written() }, &.{})).refused;
     try testing.expectEqual(oauth.errors.Code.invalid_token, elsewhere.challenge.@"error".?);
     try testing.expectEqualStrings("audience", elsewhere.challenge.error_description.?);
-    const forged = (try verifier.check(io, &http, arena, "Bearer eyJhbGciOiJFZERTQSJ9.e30.AAAA", &.{})).refused;
+    const forged = (try verifier.check(io, &http, arena, .{ .authorization = "Bearer eyJhbGciOiJFZERTQSJ9.e30.AAAA" }, &.{})).refused;
     try testing.expectEqual(std.http.Status.unauthorized, forged.status);
 
     // Introspection: the provider answers for the token `good`, naming its
@@ -831,13 +951,13 @@ test "a resource server's bearer check: JWT access tokens with the key set, or i
     var introspector = try oauth.Introspector.init(gpa, p.url(&buffer, "/introspect"), p.base, .{ .id = "rs", .credentials = .{ .client_secret_basic = "pw" } }, .{});
     defer introspector.deinit();
     const asking: oauth.bearer.Verifier = .{ .source = .{ .introspection = &introspector }, .issuer = p.base, .resource = p.base };
-    const active = try asking.check(io, &http, arena, "Bearer good", &.{"mcp"});
+    const active = try asking.check(io, &http, arena, .{ .authorization = "Bearer good" }, &.{"mcp"});
     try testing.expectEqualStrings("mcp", active.allowed.scope.?);
-    const inactive = (try asking.check(io, &http, arena, "Bearer bad", &.{})).refused;
+    const inactive = (try asking.check(io, &http, arena, .{ .authorization = "Bearer bad" }, &.{})).refused;
     try testing.expectEqualStrings("inactive", inactive.challenge.error_description.?);
     // A token the server will not introspect is the client's to fix: a 401,
     // not the 503 of a server that failed.
-    const unsupported = (try asking.check(io, &http, arena, "Bearer eyJ.structured.jwt", &.{})).refused;
+    const unsupported = (try asking.check(io, &http, arena, .{ .authorization = "Bearer eyJ.structured.jwt" }, &.{})).refused;
     try testing.expectEqual(std.http.Status.unauthorized, unsupported.status);
     try testing.expectEqualStrings("unsupported_token_type", unsupported.challenge.error_description.?);
 }

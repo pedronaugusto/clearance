@@ -136,3 +136,35 @@ fn anyInspected(_: void, c: *shake.Case) !void {
 test "any bytes are read by inspect as a signed token, or refused; what verifies is read the same" {
     try shake.check(std.testing.allocator, {}, anyInspected, .{ .cases = 2000 });
 }
+
+const dpop = @import("dpop.zig");
+
+/// A proof the fuzzer mutates, and the verifier's expectations of it.
+const ProofCase = struct { proof: []const u8, now: std.Io.Timestamp };
+
+/// Any bytes as a DPoP proof: refused, or verified for exactly the request
+/// expected, signed by the key in its own header, whose thumbprint is the
+/// binding returned.
+fn anyProof(case: ProofCase, c: *shake.Case) !void {
+    var buffer: [1024]u8 = undefined;
+    const input = shake.gen.mutated(c.source, &buffer, &.{case.proof});
+    var scratch: [jws.scratchLength(1024)]u8 = undefined;
+    var verified: dpop.Verified = undefined;
+    dpop.verifyProof(std.testing.io, input, .{ .algorithms = &.{ .es256, .eddsa }, .htm = "POST", .htu = "https://as.example/token" }, case.now, &scratch, &verified) catch return;
+    if (verified.key.material == .hmac) return error.SecretKey;
+    if (!std.mem.eql(u8, &verified.thumbprint, &jwk.thumbprint(verified.key))) return error.WrongThumbprint;
+    // What verified must verify again with the key it named.
+    _ = try jws.verifyWith(input, &verified.key, .{ .algorithms = &.{ .es256, .eddsa } }, &scratch);
+}
+
+test "any bytes are a DPoP proof of the request expected, by the key it carries, or refused" {
+    const gpa = std.testing.allocator;
+    var private = try jwk.PrivateKey.parse(gpa, "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"d\":\"nWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A\",\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}", .{});
+    defer private.deinit();
+    const key = try dpop.Key.fromJwk(&private, null);
+    const now: std.Io.Timestamp = .{ .nanoseconds = 1_800_000_000 * std.time.ns_per_s };
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try dpop.writeProof(gpa, std.testing.io, &out.writer, &key, .{ .htm = "POST", .htu = "https://as.example/token" }, now);
+    try shake.check(gpa, ProofCase{ .proof = out.written(), .now = now }, anyProof, .{ .cases = 1000 });
+}
