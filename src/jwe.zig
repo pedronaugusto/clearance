@@ -69,7 +69,7 @@ pub const DecryptionKey = struct {
                 .p521 => .p521,
             },
             .okp => |okp| if (okp.curve == .x25519) .x25519 else return error.InvalidKey,
-            .hmac => return error.InvalidKey,
+            .hmac, .akp => return error.InvalidKey,
         };
         return .{ .material = .{ .private = .{ .key = private.key, .kind = kind } }, .kid = public.kid, .management = public.management };
     }
@@ -559,7 +559,7 @@ fn agreeInto(arena: std.mem.Allocator, key: *const DecryptionKey, alg: KeyManage
     const peer: []const u8 = switch (epk.material) {
         .ec => |ec| if (std.mem.eql(u8, @tagName(held.kind), @tagName(ec.curve))) ec.point else return error.InvalidHeader,
         .okp => |okp| if (held.kind == .x25519 and okp.curve == .x25519) okp.x else return error.InvalidHeader,
-        .rsa, .hmac => return error.InvalidHeader,
+        .rsa, .hmac, .akp => return error.InvalidHeader,
     };
     const apu = if (joint.apu) |text| try decodeAlloc(arena, text) else "";
     const apv = if (joint.apv) |text| try decodeAlloc(arena, text) else "";
@@ -1002,7 +1002,7 @@ fn agreeTo(gpa: std.mem.Allocator, arena: std.mem.Allocator, draw: Draw, r: Reci
         }, ec.point },
         .okp => |okp| .{ .x25519, okp.x },
         // unreachable: fitsEncryption admits EC and X25519 keys alone
-        .rsa, .hmac => unreachable,
+        .rsa, .hmac, .akp => unreachable,
     };
     var ephemeral = try draw.ephemeral(gpa, curve);
     defer ephemeral.deinit();

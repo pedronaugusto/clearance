@@ -1,4 +1,4 @@
-//! JSON Web Keys (RFC 7517, 7518 §6, RFC 8037): a key or a set read into
+//! JSON Web Keys (RFC 7517, 7518 §6, RFC 8037, RFC 9964): a key or a set read into
 //! `Key`s, each checked as it is read, for signatures or for encryption, a
 //! private key read for signing or decrypting, and thumbprints (RFC 7638,
 //! RFC 9278).
@@ -34,6 +34,9 @@ const Wire = struct {
     y: ?[]const u8 = null,
     // oct
     k: ?strand.json.Raw = null,
+    // AKP (RFC 9964): the public key, and the private one (ML-DSA's seed)
+    @"pub": ?[]const u8 = null,
+    priv: ?strand.json.Raw = null,
     // private members of RSA, EC and OKP keys
     d: ?strand.json.Raw = null,
     p: ?strand.json.Raw = null,
@@ -48,7 +51,7 @@ const Wire = struct {
 /// `key_ops` name signatures or encryption (RFC 7517 §4.2-4.3), and a key
 /// read for one is never used for the other.
 pub const Purpose = enum {
-    /// JWS: verifying or signing. RSA, EC, Ed25519 and HMAC keys.
+    /// JWS: verifying or signing. RSA, EC, Ed25519, ML-DSA and HMAC keys.
     signatures,
     /// JWE: encrypting to the key or decrypting with it. RSA and EC keys,
     /// X25519 keys, and AES or content keys (`oct`).
@@ -58,8 +61,8 @@ pub const Purpose = enum {
 /// Why a key was left out of a set.
 pub const Skip = enum {
     /// `kty` or `crv` names a kind clearance does not use for the purpose
-    /// (for signatures X25519, for encryption Ed25519; P-521, secp256k1,
-    /// Ed448, AKP...).
+    /// (for signatures X25519, for encryption Ed25519 and ML-DSA; secp256k1,
+    /// Ed448, an AKP key of an algorithm other than ML-DSA...).
     unsupported,
     /// Read for signatures: `use` is `enc`, or `key_ops` allows neither
     /// signing nor verifying.
@@ -232,9 +235,9 @@ pub const PrivateError = error{
     /// Not one JSON object with a `kty`.
     InvalidDocument,
     TooLarge,
-    /// A `kty` or `crv` clearance does not sign with (X25519, P-521, a
-    /// multi-prime RSA key, an RSA key without its CRT members), or `oct`:
-    /// an HMAC secret is read by `KeySet.parse` with `secrets`.
+    /// A `kty` or `crv` clearance does not sign with (X25519, a multi-prime
+    /// RSA key, an RSA key without its CRT members), or `oct`: an HMAC
+    /// secret is read by `KeySet.parse` with `secrets`.
     UnsupportedKey,
     /// A public key: no private member.
     NotPrivate,
@@ -253,9 +256,10 @@ pub const PrivateError = error{
     InvalidKey,
 } || std.mem.Allocator.Error;
 
-/// A private JWK read for signing (RFC 7518 §6.2.2, §6.3.2, RFC 8037 §2): an
-/// EC key on P-256, P-384 or P-521, an Ed25519 key, or a two-prime RSA key with its
-/// CRT members; `jws.Signer.fromJwk` signs with it. Or read for decrypting:
+/// A private JWK read for signing (RFC 7518 §6.2.2, §6.3.2, RFC 8037 §2, RFC
+/// 9964 §4): an EC key on P-256, P-384 or P-521, an Ed25519 key, a two-prime
+/// RSA key with its CRT members, or an ML-DSA key by its 32-byte seed;
+/// `jws.Signer.fromJwk` signs with it. Or read for decrypting:
 /// an RSA, EC or X25519 key (RFC 8037 §3.2), which `jwe.Key.fromJwk` holds.
 pub const PrivateKey = struct {
     /// The key, as cloak holds it: wiped when its last owner releases it.
@@ -284,7 +288,8 @@ pub const PrivateKey = struct {
             else => error.InvalidDocument,
         };
         if (std.mem.eql(u8, w.kty, "oct") or w.oth != null) return error.UnsupportedKey;
-        if (w.d == null) return error.NotPrivate;
+        // An AKP key's private member is `priv` (RFC 9964 §3), the others' `d`.
+        const secret_member = (if (std.mem.eql(u8, w.kty, "AKP")) w.priv else w.d) orelse return error.NotPrivate;
 
         // The public half, through the same checks a key set's keys get.
         var public_wire = w;
@@ -294,6 +299,7 @@ pub const PrivateKey = struct {
         public_wire.dp = null;
         public_wire.dq = null;
         public_wire.qi = null;
+        public_wire.priv = null;
         var why: Skip = undefined;
         var no_secrets: Secrets = .{ .storage = &.{} };
         var public = read(arena.allocator(), public_wire, .{ .purpose = options.purpose, .secrets = false, .min_rsa_bits = options.min_rsa_bits }, &no_secrets, &why) catch |err| switch (err) {
@@ -315,7 +321,7 @@ pub const PrivateKey = struct {
         // The kid borrowed the document, which is wiped on return.
         if (public.kid) |kid| public.kid = try arena.allocator().dupe(u8, kid);
 
-        const d = rawText(w.d.?) orelse return error.InvalidKey;
+        const d = rawText(secret_member) orelse return error.InvalidKey;
         const rsa_members = [_]?strand.json.Raw{ w.p, w.q, w.dp, w.dq, w.qi };
         var length = base64url.decodedLength(d) catch return error.InvalidKey;
         if (public.material == .rsa) for (rsa_members) |member| {
@@ -345,6 +351,9 @@ pub const PrivateKey = struct {
                 .ed25519 => .{ .ed25519 = .{ .seed = private_scalar, .public = okp.x } },
                 .x25519 => .{ .x25519 = .{ .d = private_scalar, .public = okp.x } },
             },
+            // The seed, the one private form RFC 9964 §4 defines; the public
+            // key derived from it and compared with `pub`.
+            .akp => |akp| .{ .mldsa = .{ .level = akp.level, .seed = private_scalar, .public = akp.public } },
             .rsa => |rsa| blk: {
                 var members: [5][]const u8 = undefined;
                 for (rsa_members, &members) |member, *out| out.* = decodeInto(storage, &used, rawText(member.?).?) orelse return error.InvalidKey;
@@ -415,7 +424,7 @@ fn read(arena: std.mem.Allocator, w: Wire, options: Reading, secrets: *Secrets, 
     var key: Key = .{ .material = undefined, .kid = w.kid };
     const signatures = options.purpose == .signatures;
     try readUse(w, signatures, &key, why);
-    const private = w.d != null or w.p != null or w.q != null or w.dp != null or w.dq != null or w.qi != null or w.oth != null;
+    const private = w.d != null or w.p != null or w.q != null or w.dp != null or w.dq != null or w.qi != null or w.oth != null or w.priv != null;
     if (std.mem.eql(u8, w.kty, "RSA")) {
         if (private) return skip(why, .private);
         const n = try decodeMember(arena, w.n) orelse return skip(why, .invalid);
@@ -456,6 +465,16 @@ fn read(arena: std.mem.Allocator, w: Wire, options: Reading, secrets: *Secrets, 
         // refuses the ones of small order.
         if (curve == .ed25519) _ = std.crypto.sign.Ed25519.PublicKey.fromBytes(x[0..32].*) catch return skip(why, .invalid);
         key.material = .{ .okp = .{ .curve = curve, .x = x } };
+    } else if (std.mem.eql(u8, w.kty, "AKP")) {
+        if (!signatures) return skip(why, .unsupported);
+        if (private) return skip(why, .private);
+        // `alg` is required (RFC 9964 §3): the key is for that algorithm alone.
+        const alg = Algorithm.parse(w.alg orelse return skip(why, .invalid)) orelse return skip(why, .unsupported);
+        const level = alg.mldsa() orelse return skip(why, .algorithm);
+        const public = try decodeMember(arena, w.@"pub") orelse return skip(why, .invalid);
+        // FIPS 204's pkDecode takes any bytes of the level's length (RFC 9964 §7.3).
+        if (public.len != cloak.certificates.certificate.Algorithm.mldsaPublicKeyLength(level)) return skip(why, .invalid);
+        key.material = .{ .akp = .{ .level = level, .public = public } };
     } else if (std.mem.eql(u8, w.kty, "oct")) {
         if (!options.secrets) return skip(why, .secret);
         const k = rawText(w.k orelse return skip(why, .invalid)) orelse return skip(why, .invalid);
@@ -656,6 +675,14 @@ fn writeRequired(w: *std.Io.Writer, key: Key) std.Io.Writer.Error!void {
         .okp => |okp| {
             try w.writeAll(if (okp.curve == .ed25519) "{\"crv\":\"Ed25519\",\"kty\":\"OKP\",\"x\":\"" else "{\"crv\":\"X25519\",\"kty\":\"OKP\",\"x\":\"");
             try base64url.encode(w, okp.x);
+            try w.writeAll("\"}");
+        },
+        // RFC 9964 §6: `alg`, `kty`, `pub`.
+        .akp => |akp| {
+            try w.writeAll("{\"alg\":\"");
+            try w.writeAll(Algorithm.ofMlDsa(akp.level).name());
+            try w.writeAll("\",\"kty\":\"AKP\",\"pub\":\"");
+            try base64url.encode(w, akp.public);
             try w.writeAll("\"}");
         },
         .hmac => |secret| {

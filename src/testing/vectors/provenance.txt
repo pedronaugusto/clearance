@@ -1,2 +1,3 @@
 rfc7520/: the JOSE cookbook (RFC 7520) as JSON, https://github.com/ietf-jose/cookbook/tree/13692b68bfc18b99557a5b1ed311fd5077bfff04
 wycheproof/: https://github.com/C2SP/wycheproof/tree/12fd3aaf33eb5fa1f52e026912ee00c054f9d984/testvectors_v1 (Apache-2.0, LICENSE beside them)
+rfc9964/: RFC 9964 Appendix A.1 (ML-DSA for JOSE), each example's JSON as the RFC prints it, its wrapped lines joined, https://www.rfc-editor.org/rfc/rfc9964.txt

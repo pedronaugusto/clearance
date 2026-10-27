@@ -85,3 +85,52 @@ test "a key set's reading fails for memory as memory, never by leaving keys out"
         }
     }.run, .{});
 }
+
+test "RFC 9964: an AKP key is kept only with its ML-DSA alg and a public key of that level's length, for signatures" {
+    // ML-DSA-44's public key is 1312 bytes: 1750 base64url characters.
+    const pub44: [1750]u8 = @splat('A');
+    const doc =
+        \\{"keys":[
+        \\ {"kty":"AKP","alg":"ML-DSA-44","kid":"kept","pub":"
+    ++ pub44 ++
+        \\"},
+        \\ {"kty":"AKP","pub":"
+    ++ pub44 ++
+        \\"},
+        \\ {"kty":"AKP","alg":"ML-DSA-65","pub":"
+    ++ pub44 ++
+        \\"},
+        \\ {"kty":"AKP","alg":"SLH-DSA-SHA2-128s","pub":"
+    ++ pub44 ++
+        \\"},
+        \\ {"kty":"AKP","alg":"ES256","pub":"
+    ++ pub44 ++
+        \\"},
+        \\ {"kty":"AKP","alg":"ML-DSA-44","pub":"
+    ++ pub44 ++
+        \\","priv":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}
+        \\]}
+    ;
+    var set = try jwk.KeySet.parse(gpa, doc, .{});
+    defer set.deinit();
+    try std.testing.expectEqual(@as(usize, 1), set.keys.len);
+    try std.testing.expectEqualStrings("kept", set.keys[0].kid.?);
+    try std.testing.expectEqual(@as(usize, 1312), set.keys[0].material.akp.public.len);
+    try std.testing.expect(set.keys[0].fits(.ml_dsa_44));
+    try std.testing.expect(!set.keys[0].fits(.ml_dsa_65));
+    try std.testing.expect(!set.keys[0].fits(.eddsa));
+    // No alg, and a 44's key under 65: invalid; another AKP algorithm: unsupported; a
+    // signature algorithm of another kind: algorithm; the seed beside it: private.
+    try std.testing.expectEqual(@as(u16, 2), set.skipped.get(.invalid));
+    try std.testing.expectEqual(@as(u16, 1), set.skipped.get(.unsupported));
+    try std.testing.expectEqual(@as(u16, 1), set.skipped.get(.algorithm));
+    try std.testing.expectEqual(@as(u16, 1), set.skipped.get(.private));
+    // Read for encryption, an ML-DSA key is not one.
+    var encryption = try jwk.KeySet.parse(gpa, doc, .{ .purpose = .encryption });
+    defer encryption.deinit();
+    try std.testing.expectEqual(@as(usize, 0), encryption.keys.len);
+    // A private AKP key needs its 32-byte seed; a seed whose key is not `pub` is refused.
+    try std.testing.expectError(error.NotPrivate, jwk.PrivateKey.parse(gpa, "{\"kty\":\"AKP\",\"alg\":\"ML-DSA-44\",\"pub\":\"" ++ pub44 ++ "\"}", .{}));
+    try std.testing.expectError(error.InvalidKey, jwk.PrivateKey.parse(gpa, "{\"kty\":\"AKP\",\"alg\":\"ML-DSA-44\",\"pub\":\"" ++ pub44 ++ "\",\"priv\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}", .{}));
+    try std.testing.expectError(error.InvalidKey, jwk.PrivateKey.parse(gpa, "{\"kty\":\"AKP\",\"alg\":\"ML-DSA-44\",\"pub\":\"" ++ pub44 ++ "\",\"priv\":\"AAAA\"}", .{}));
+}

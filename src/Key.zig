@@ -25,7 +25,12 @@ pub const Material = union(Algorithm.Family) {
     ec: struct { curve: Curve, point: []const u8 },
     /// An Ed25519 public key, or an X25519 one (read for encryption only).
     okp: struct { curve: OkpCurve = .ed25519, x: []const u8 },
+    /// An ML-DSA public key (RFC 9964's AKP `pub`, FIPS 204's encoding) of
+    /// one level, the one its JWK's `alg` names.
+    akp: struct { level: MlDsa, public: []const u8 },
 };
+
+pub const MlDsa = cloak.certificates.certificate.Algorithm.MlDsa;
 
 /// What a JWK's `use` says the key is for.
 pub const Use = enum { any, sig, enc };
@@ -69,6 +74,7 @@ pub fn fits(key: Key, alg: Algorithm) bool {
     return switch (key.material) {
         .ec => |ec| ec.curve == alg.curve().?,
         .okp => |okp| okp.curve == .ed25519,
+        .akp => |akp| akp.level == alg.mldsa().?,
         else => true,
     };
 }
@@ -104,6 +110,7 @@ pub fn public(key: Key) ?cloak.certificates.certificate.Algorithm.PublicKey {
             .ed25519 => .{ .ed25519 = okp.x },
             .x25519 => .{ .x25519 = okp.x },
         },
+        .akp => |akp| .{ .mldsa = .{ .level = akp.level, .bytes = akp.public } },
     };
 }
 

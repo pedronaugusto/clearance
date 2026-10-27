@@ -596,7 +596,7 @@ fn check(key: *const Key, alg: Algorithm, signing_input: []const u8, signature: 
             if (bits(rsa.n) < options.min_rsa_bits) return error.WeakKey;
             cloak.certificates.signature.verify(key.public().?, alg.signature(), signing_input, signature) catch return error.InvalidSignature;
         },
-        .ec, .okp => cloak.certificates.signature.verify(key.public().?, alg.signature(), signing_input, signature) catch return error.InvalidSignature,
+        .ec, .okp, .akp => cloak.certificates.signature.verify(key.public().?, alg.signature(), signing_input, signature) catch return error.InvalidSignature,
     }
 }
 
@@ -647,7 +647,8 @@ pub const Signer = union(enum) {
 
     /// A private JWK signing with `alg`, or, when null, the algorithm its
     /// `alg` member names or its curve implies (ES256, ES384, ES512, EdDSA; an RSA
-    /// key names none). The signer borrows `private.key`.
+    /// key names none; an AKP key always names its own). The signer borrows
+    /// `private.key`.
     pub fn fromJwk(private: *const jwk.PrivateKey, alg: ?Algorithm) error{InvalidKey}!Signer {
         const chosen = alg orelse private.public.alg orelse switch (private.public.material) {
             .ec => |ec| switch (ec.curve) {
@@ -656,6 +657,7 @@ pub const Signer = union(enum) {
                 .p521 => Algorithm.es512,
             },
             .okp => Algorithm.eddsa,
+            .akp => |akp| Algorithm.ofMlDsa(akp.level),
             .rsa, .hmac => return error.InvalidKey,
         };
         if (!private.public.fits(chosen)) return error.InvalidKey;

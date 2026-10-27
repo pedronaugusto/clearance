@@ -1,5 +1,5 @@
 //! The JWS algorithms clearance signs and verifies (RFC 7518 §3, RFC 8037,
-//! RFC 9864), and the JWE ones it encrypts and decrypts with (RFC 7518 §4
+//! RFC 9864, RFC 9964), and the JWE ones it encrypts and decrypts with (RFC 7518 §4
 //! and §5, RFC 8037 §3.2). `none` is not one of them, nor JWE's `RSA1_5`:
 //! no value of these types spells either.
 const std = @import("std");
@@ -24,15 +24,24 @@ pub const Algorithm = enum {
     eddsa,
     /// Ed25519 under its fully specified name (RFC 9864).
     ed25519,
+    /// ML-DSA (FIPS 204, RFC 9964) with an AKP key of its own level: pure
+    /// ML-DSA, the empty context; HashML-DSA has no JOSE name.
+    ml_dsa_44,
+    ml_dsa_65,
+    ml_dsa_87,
 
-    /// The kind of key an algorithm takes.
-    pub const Family = enum { hmac, rsa, ec, okp };
+    /// The kind of key an algorithm takes: `akp` is RFC 9964's Algorithm
+    /// Key Pair, a key for the one algorithm its `alg` names.
+    pub const Family = enum { hmac, rsa, ec, okp, akp };
 
     /// The name a header carries.
     pub fn name(a: Algorithm) []const u8 {
         return switch (a) {
             .eddsa => "EdDSA",
             .ed25519 => "Ed25519",
+            .ml_dsa_44 => "ML-DSA-44",
+            .ml_dsa_65 => "ML-DSA-65",
+            .ml_dsa_87 => "ML-DSA-87",
             inline else => |tag| comptime upper(@tagName(tag)),
         };
     }
@@ -52,16 +61,18 @@ pub const Algorithm = enum {
             .rs256, .rs384, .rs512, .ps256, .ps384, .ps512 => .rsa,
             .es256, .es384, .es512 => .ec,
             .eddsa, .ed25519 => .okp,
+            .ml_dsa_44, .ml_dsa_65, .ml_dsa_87 => .akp,
         };
     }
 
-    /// The hash an algorithm signs with; Ed25519's is internal to it.
+    /// The hash an algorithm signs with; Ed25519's and ML-DSA's are internal
+    /// to them.
     pub fn hash(a: Algorithm) ?cloak.certificates.certificate.Algorithm.Hash {
         return switch (a) {
             .hs256, .rs256, .ps256, .es256 => .sha256,
             .hs384, .rs384, .ps384, .es384 => .sha384,
             .hs512, .rs512, .ps512, .es512 => .sha512,
-            .eddsa, .ed25519 => null,
+            .eddsa, .ed25519, .ml_dsa_44, .ml_dsa_65, .ml_dsa_87 => null,
         };
     }
 
@@ -75,6 +86,25 @@ pub const Algorithm = enum {
         };
     }
 
+    /// The algorithm of an ML-DSA level: an AKP key's.
+    pub fn ofMlDsa(level: cloak.certificates.certificate.Algorithm.MlDsa) Algorithm {
+        return switch (level) {
+            .mldsa44 => .ml_dsa_44,
+            .mldsa65 => .ml_dsa_65,
+            .mldsa87 => .ml_dsa_87,
+        };
+    }
+
+    /// The ML-DSA level an ML-DSA algorithm requires of its key.
+    pub fn mldsa(a: Algorithm) ?cloak.certificates.certificate.Algorithm.MlDsa {
+        return switch (a) {
+            .ml_dsa_44 => .mldsa44,
+            .ml_dsa_65 => .mldsa65,
+            .ml_dsa_87 => .mldsa87,
+            else => null,
+        };
+    }
+
     /// cloak's name for a public-key algorithm: PSS with MGF1 over the same
     /// hash and a salt as long as the hash (RFC 7518 §3.5); ECDSA as r || s.
     pub fn signature(a: Algorithm) cloak.certificates.certificate.Algorithm.Signature {
@@ -83,6 +113,7 @@ pub const Algorithm = enum {
             .ps256, .ps384, .ps512 => .{ .pss = .{ .hash = a.hash().?, .mgf_hash = a.hash().?, .salt_length = hashLength(a.hash().?) } },
             .es256, .es384, .es512 => .{ .ecdsa_p1363 = a.hash().? },
             .eddsa, .ed25519 => .ed25519,
+            .ml_dsa_44, .ml_dsa_65, .ml_dsa_87 => .{ .mldsa = a.mldsa().? },
             .hs256, .hs384, .hs512 => unreachable, // MACs are not cloak's
         };
     }
@@ -256,12 +287,14 @@ fn upper(comptime text: []const u8) []const u8 {
 test "names are the registered ones and parse back exactly" {
     try std.testing.expectEqualStrings("HS256", Algorithm.hs256.name());
     try std.testing.expectEqualStrings("EdDSA", Algorithm.eddsa.name());
+    try std.testing.expectEqualStrings("ML-DSA-65", Algorithm.ml_dsa_65.name());
     inline for (comptime std.enums.values(Algorithm)) |a| {
         try std.testing.expectEqual(a, Algorithm.parse(a.name()).?);
     }
     try std.testing.expectEqual(@as(?Algorithm, null), Algorithm.parse("none"));
     try std.testing.expectEqual(@as(?Algorithm, null), Algorithm.parse("hs256"));
     try std.testing.expectEqual(@as(?Algorithm, null), Algorithm.parse("ES256K"));
+    try std.testing.expectEqual(@as(?Algorithm, null), Algorithm.parse("ml-dsa-44"));
 }
 
 test "JWE names are the registered ones and parse back; RSA1_5 and the A192 variants spell nothing" {
