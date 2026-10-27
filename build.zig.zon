@@ -16,19 +16,21 @@
     },
     .dependencies = .{
         .aegis = .{
-            .url = "git+https://github.com/pedronaugusto/aegis?ref=v0.1.14#5852ab956e97a47926af73abbb7dced5361f9267",
-            .hash = "aegis-0.1.14-rsxouiwFCACpt6FVOECFUhpjUaetlNneWpaDTj95q514",
+            .url = "git+https://github.com/pedronaugusto/aegis?ref=secretbytes-unmanaged#3dd390afd0ea71d63b26662d9d993b60200acd3b",
+            .hash = "aegis-0.1.18-rsxouv22CAB8z3YZeX530Qh9OaiKeE_4m3jgrWTgFa6p",
         },
+
         .strand = .{
             .url = "git+https://github.com/pedronaugusto/strand?ref=v0.11.1#b344241da8d6611fd00202250633bc0b97b1e0f6",
             .hash = "strand-0.11.1-8LNWVtZJJgDujColV9BwoK1duuRMWp4bfuV2Gc2iLTEI",
         },
         .cloak = .{
-            .url = "git+https://github.com/pedronaugusto/cloak#d43722c29b08141d07499a0d947c31955b8bd7d4",
-            .hash = "cloak-0.22.1-9onwcUU7CwRC2VpIcuL9X0439oRrnp-TSyduOwfYqsaL",
+            .url = "git+https://github.com/pedronaugusto/cloak#7ac6908f998136c53b4c0bbcf0729b646fbde0a6",
+            .hash = "cloak-0.22.2-9onwcYPoMgSwBa5H2CXg-bSJgzQgHrK17Cal7LstIMB-",
         },
         .uplink = .{
-            .path = "../uplink-dev",
+            .url = "git+https://github.com/pedronaugusto/uplink#4adf07c2a270d9446f841044cd0f09d841fe053a",
+            .hash = "uplink-0.10.1-0eVSJim1FwA4vC9fLDmDszLK-NGWz_1L6CWru17iDGHn",
             .lazy = true,
         },
     },

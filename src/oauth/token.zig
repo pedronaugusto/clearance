@@ -149,6 +149,8 @@ pub const TokenSet = struct {
     id_token: ?[]const u8 = null,
     /// Private: holds every string above.
     storage: aegis.SecretBytes,
+    /// What the secret bytes were allocated with, which frees them.
+    gpa: std.mem.Allocator,
 
     /// The members, borrowed: what `init` copies.
     pub const Fields = struct {
@@ -171,7 +173,7 @@ pub const TokenSet = struct {
         var storage = aegis.SecretBytes.init(gpa, total) catch return error.OutOfMemory;
         // unreachable: the capacity was just allocated at this length
         storage.resizeWithinCapacity(total) catch unreachable;
-        var set: TokenSet = .{ .access_token = undefined, .token_type = values.token_type, .expires_at = values.expires_at, .storage = storage };
+        var set: TokenSet = .{ .access_token = undefined, .token_type = values.token_type, .expires_at = values.expires_at, .storage = storage, .gpa = gpa };
         var at: usize = 0;
         const bytes = set.storage.exposeMut();
         inline for (strings) |s| {
@@ -188,7 +190,7 @@ pub const TokenSet = struct {
     }
 
     pub fn deinit(set: *TokenSet) void {
-        set.storage.deinit();
+        set.storage.deinit(set.gpa);
         set.* = undefined;
     }
 

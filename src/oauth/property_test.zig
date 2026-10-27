@@ -412,7 +412,7 @@ fn anyRedemption(_: void, c: *shake.Case) !void {
         "{\"access_token\":\"at\",\"token_type\":\"bearer\",\"resource\":[\"https://mcp.example/mcp\"],\"authorization_details\":[]}",
         "{\"error\":\"invalid_grant\"}",
     });
-    var grant: oauth.id_jag.Grant = .{ .assertion = "", .scope = "a b", .expires_at = jag_now_s + 300, .storage = try aegis.SecretBytes.init(c.gpa, 0) };
+    var grant: oauth.id_jag.Grant = .{ .assertion = "", .scope = "a b", .expires_at = jag_now_s + 300, .storage = try aegis.SecretBytes.init(c.gpa, 0), .gpa = c.gpa };
     defer grant.deinit();
     const status: u16 = if (shake.gen.boolean(c.source)) 200 else 400;
     var response = oauth.id_jag.readRedemption(c.gpa, status, input, &grant, jag_request.resource, .{ .now = .{ .nanoseconds = 0 } }) catch return;

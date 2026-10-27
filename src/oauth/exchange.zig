@@ -57,9 +57,11 @@ pub const Issued = struct {
     scope: ?[]const u8 = null,
     /// Private: holds every string above.
     storage: aegis.SecretBytes,
+    /// What the secret bytes were allocated with, which frees them.
+    gpa: std.mem.Allocator,
 
     pub fn deinit(i: *Issued) void {
-        i.storage.deinit();
+        i.storage.deinit(i.gpa);
         i.* = undefined;
     }
 };
@@ -134,6 +136,7 @@ pub fn readResponse(gpa: std.mem.Allocator, status: u16, body: []const u8, optio
         .expires_at = if (wire.expires_in) |seconds| now +| @as(i64, seconds) else null,
         .scope = if (wire.scope != null) copies[3] else null,
         .storage = storage,
+        .gpa = gpa,
     } };
 }
 

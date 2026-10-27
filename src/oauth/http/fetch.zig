@@ -57,9 +57,11 @@ pub const SecretAnswer = struct {
     body: aegis.SecretBytes,
     /// The answer's `DPoP-Nonce` (RFC 9449 §8), when it has one that fits.
     dpop_nonce: ?errors.Text(256) = null,
+    /// What the secret bytes were allocated with, which frees them.
+    gpa: std.mem.Allocator,
 
     pub fn deinit(a: *SecretAnswer) void {
-        a.body.deinit();
+        a.body.deinit(a.gpa);
         a.* = undefined;
     }
 };
@@ -160,7 +162,7 @@ pub fn postForm(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, target
 /// wiped memory.
 pub fn postJson(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, target: []const u8, body: []const u8, bearer: ?[]const u8, limit: Bytes, options: Options) Error!SecretAnswer {
     var authorization: ?aegis.SecretBytes = null;
-    defer if (authorization) |*a| a.deinit();
+    defer if (authorization) |*a| a.deinit(gpa);
     var headers: [3]uplink.Header = .{
         .{ .name = "Content-Type", .value = "application/json" },
         .{ .name = "Accept", .value = "application/json" },
@@ -194,19 +196,19 @@ fn post(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, target: []cons
     });
     defer response.deinit(io);
     var out = try readSecret(gpa, io, &response, limit.raw());
-    errdefer out.deinit();
+    errdefer out.deinit(gpa);
     var nonce: ?errors.Text(256) = null;
     if (response.headers.get("dpop-nonce")) |n| if (n.len <= 256) {
         nonce = .init(n);
     };
-    return .{ .status = @backingInt(response.status), .body = out, .dpop_nonce = nonce };
+    return .{ .status = @backingInt(response.status), .body = out, .dpop_nonce = nonce, .gpa = gpa };
 }
 
 /// The body into wiped memory: grown by doubling, each old buffer wiped as
 /// it is left.
 fn readSecret(gpa: std.mem.Allocator, io: std.Io, response: *uplink.Response, limit: usize) Error!aegis.SecretBytes {
     var out = aegis.SecretBytes.init(gpa, @min(limit, 4096)) catch return error.OutOfMemory;
-    errdefer out.deinit();
+    errdefer out.deinit(gpa);
     const reader = response.reader(io);
     while (true) {
         if (out.len() == out.capacity()) {
@@ -217,7 +219,7 @@ fn readSecret(gpa: std.mem.Allocator, io: std.Io, response: *uplink.Response, li
                 if (n == 0) return out;
                 return error.TooLarge;
             }
-            out.reserve(@min(limit, out.capacity() * 2)) catch return error.OutOfMemory;
+            out.reserve(gpa, @min(limit, out.capacity() * 2)) catch return error.OutOfMemory;
         }
         const at = out.len();
         // unreachable: within the capacity just checked

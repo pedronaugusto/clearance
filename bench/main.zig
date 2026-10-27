@@ -293,18 +293,28 @@ const Bench = struct {
         try b.sealJwe(.a256gcm);
     }
 
+    /// ECDH-ES+A128KW to the P-256 key: each encryption draws an ephemeral
+    /// key, each decryption agrees with the token's.
+    fn setupEcdhEs(b: *Bench) WorkloadError!void {
+        b.private = try clearance.jwk.PrivateKey.parse(b.gpa, es256_private_jwk, .{ .purpose = .encryption });
+        b.jwe_key = clearance.jwe.DecryptionKey.fromJwk(&b.private) catch return error.InvalidKey;
+        b.jwe_recipient = .{ .alg = .ecdh_es_a128kw, .key = .{ .key = b.private.public } };
+        try b.sealJwe(.a256gcm);
+    }
+
     fn teardownJwe(b: *Bench) WorkloadError!void {
         b.gpa.free(b.jwe_scratch);
         b.jwe_token.deinit();
     }
 
-    fn teardownRsaOaep(b: *Bench) WorkloadError!void {
+    /// A row that parsed a private key (RSA-OAEP's, ECDH-ES's).
+    fn teardownPrivate(b: *Bench) WorkloadError!void {
         try b.teardownJwe();
         b.private.deinit();
     }
 
     fn decryptJwe(b: *Bench, units: u64) WorkloadError!void {
-        const options: clearance.jwe.Options = .{ .key_algorithms = &.{ .a128kw, .dir, .rsa_oaep_256 }, .encryptions = &.{ .a128cbc_hs256, .a256gcm } };
+        const options: clearance.jwe.Options = .{ .key_algorithms = &.{ .a128kw, .dir, .rsa_oaep_256, .ecdh_es_a128kw }, .encryptions = &.{ .a128cbc_hs256, .a256gcm } };
         for (0..units) |_| {
             const d = try clearance.jwe.decrypt(b.io, b.jwe_token.written(), &.{b.jwe_key}, options, b.jwe_scratch);
             b.sink +%= d.plaintext.len;
@@ -406,8 +416,10 @@ const rows = [_]Row{
     .{ .name = "jwe/decrypt-a128kw-a128cbc-hs256", .unit = "token", .run = Bench.decryptJwe, .fixture = .{ .lifetime = .row, .setup = Bench.setupKeyWrap, .teardown = Bench.teardownJwe } },
     .{ .name = "jwe/encrypt-a128kw-a128cbc-hs256", .unit = "token", .run = Bench.encryptJwe, .fixture = .{ .lifetime = .row, .setup = Bench.setupKeyWrap, .teardown = Bench.teardownJwe } },
     .{ .name = "jwe/decrypt-dir-a256gcm", .unit = "token", .run = Bench.decryptJwe, .fixture = .{ .lifetime = .row, .setup = Bench.setupDirect, .teardown = Bench.teardownJwe } },
-    .{ .name = "jwe/decrypt-rsa-oaep-256-2048-a256gcm", .unit = "token", .run = Bench.decryptJwe, .fixture = .{ .lifetime = .row, .setup = Bench.setupRsaOaep, .teardown = Bench.teardownRsaOaep } },
-    .{ .name = "jwe/encrypt-rsa-oaep-256-2048-a256gcm", .unit = "token", .run = Bench.encryptJwe, .fixture = .{ .lifetime = .row, .setup = Bench.setupRsaOaep, .teardown = Bench.teardownRsaOaep } },
+    .{ .name = "jwe/decrypt-rsa-oaep-256-2048-a256gcm", .unit = "token", .run = Bench.decryptJwe, .fixture = .{ .lifetime = .row, .setup = Bench.setupRsaOaep, .teardown = Bench.teardownPrivate } },
+    .{ .name = "jwe/encrypt-rsa-oaep-256-2048-a256gcm", .unit = "token", .run = Bench.encryptJwe, .fixture = .{ .lifetime = .row, .setup = Bench.setupRsaOaep, .teardown = Bench.teardownPrivate } },
+    .{ .name = "jwe/decrypt-ecdh-es-a128kw-p256-a256gcm", .unit = "token", .run = Bench.decryptJwe, .fixture = .{ .lifetime = .row, .setup = Bench.setupEcdhEs, .teardown = Bench.teardownPrivate } },
+    .{ .name = "jwe/encrypt-ecdh-es-a128kw-p256-a256gcm", .unit = "token", .run = Bench.encryptJwe, .fixture = .{ .lifetime = .row, .setup = Bench.setupEcdhEs, .teardown = Bench.teardownPrivate } },
     .{ .name = "id_token/verify-nested-a128kw-hs256", .unit = "token", .run = Bench.verifyNested, .fixture = .{ .lifetime = .row, .setup = Bench.setupNested, .teardown = Bench.teardownJwe } },
     .{ .name = "logout/verify-token-hs256", .unit = "token", .run = Bench.verifyLogoutToken, .fixture = .{ .lifetime = .row, .setup = Bench.setupLogout, .teardown = Bench.teardownLogout } },
     .{ .name = "oauth/read-token-response", .unit = "response", .run = Bench.readTokenResponse },

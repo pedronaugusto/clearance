@@ -186,7 +186,12 @@ revocation (RFC 7009), and DPoP (RFC 9449): proofs written and verified,
 tokens bound to the client's key, the servers' nonces kept, a replay set for
 a resource server's proofs, pushed authorization requests (RFC 9126), OpenID Connect's UserInfo with the
 subject held to the ID token's, and OpenID Connect logout (RP-initiated,
-back-channel logout tokens verified once, front-channel). Their messages: RFC 8414 and OpenID Connect Discovery metadata, RFC 9728 protected
+back-channel logout tokens verified once, front-channel). JWE (RFC 7516,
+RFC 7518), the safe subset, decrypted and encrypted in every serialization:
+RSA-OAEP, AES key wrap and AES-GCM key wrap, `dir`, ECDH-ES (direct and with
+key wrap, on P-256, P-384 and X25519) and PBES2; A128GCM, A256GCM and the
+AES-CBC-HMAC pairs; nested JWTs and encrypted ID tokens and UserInfo
+answers. Their messages: RFC 8414 and OpenID Connect Discovery metadata, RFC 9728 protected
 resource metadata, PKCE (S256), the authorization request with RFC 8707
 resources and its callback with RFC 9207's `iss`, the authorization code,
 refresh, client credentials, token exchange (RFC 8693) and JWT-bearer
@@ -197,8 +202,9 @@ registration, client ID metadata documents, RFC 7662 introspection, RFC 6750
 challenges with `resource_metadata`.
 
 Not built, by decision: an authorization server; ES256K and Ed448; rich
-authorization requests (RFC 9396), JARM and CIBA; JWE's RSA1_5 and `zip`.
-Not built yet: JWE, mTLS client
+authorization requests (RFC 9396), JARM and CIBA; JWE's RSA1_5 and `zip`,
+and its 192-bit AES algorithms (A192KW, A192GCMKW, A192GCM, A192CBC-HS384:
+std has no AES-192, and nothing needs it). Not built yet: mTLS client
 authentication and bound tokens (RFC 8705), JAR, ES512.
 
 ## Built with

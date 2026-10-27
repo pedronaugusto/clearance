@@ -119,7 +119,7 @@ pub const Headers = struct {
     gpa: std.mem.Allocator,
 
     pub fn deinit(h: *Headers) void {
-        h.authorization.deinit();
+        h.authorization.deinit(h.gpa);
         h.gpa.free(h.dpop);
         h.* = undefined;
     }
