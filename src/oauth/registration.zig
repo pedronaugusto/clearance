@@ -96,9 +96,11 @@ pub const Registration = struct {
     scope: ?[]const u8 = null,
     /// Private: holds every string above.
     storage: aegis.SecretBytes,
+    /// What the secret bytes were allocated with, which frees them.
+    gpa: std.mem.Allocator,
 
     pub fn deinit(r: *Registration) void {
-        r.storage.deinit();
+        r.storage.deinit(r.gpa);
         r.* = undefined;
     }
 };
@@ -148,7 +150,7 @@ pub fn readResponse(gpa: std.mem.Allocator, status: u16, body: []const u8, optio
     // the secret among them, lives in it.
     const capacity = body.len * 3 + 4096;
     var storage = aegis.SecretBytes.init(gpa, capacity) catch return error.OutOfMemory;
-    errdefer storage.deinit();
+    errdefer storage.deinit(gpa);
     // unreachable: the capacity was just allocated at this length
     storage.resizeWithinCapacity(capacity) catch unreachable;
     const bytes = storage.exposeMut();
@@ -159,7 +161,7 @@ pub fn readResponse(gpa: std.mem.Allocator, status: u16, body: []const u8, optio
         .limits = .{ .depth = 16 },
     }) catch return error.InvalidResponse;
     if (wire.client_id.len == 0) return error.InvalidResponse;
-    var r: Registration = .{ .client_id = wire.client_id, .storage = storage };
+    var r: Registration = .{ .client_id = wire.client_id, .storage = storage, .gpa = gpa };
     inline for (@typeInfo(Wire).@"struct".field_names) |name| {
         if (comptime !std.mem.eql(u8, name, "client_id")) @field(r, name) = @field(wire, name);
     }

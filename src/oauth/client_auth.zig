@@ -77,12 +77,14 @@ pub const FormRequest = struct {
     /// The `Authorization` field's value, when the method puts the client's
     /// credentials there.
     authorization: ?aegis.SecretBytes = null,
+    /// What the secret bytes were allocated with, which frees them.
+    gpa: std.mem.Allocator,
 
     pub const content_type = form.content_type;
 
     pub fn deinit(r: *FormRequest) void {
-        r.body.deinit();
-        if (r.authorization) |*a| a.deinit();
+        r.body.deinit(r.gpa);
+        if (r.authorization) |*a| a.deinit(r.gpa);
         r.* = undefined;
     }
 };
@@ -112,7 +114,7 @@ pub fn formRequest(gpa: std.mem.Allocator, io: std.Io, maybe_client: ?Client, pa
     var assertion: std.Io.Writer.Allocating = .init(gpa);
     defer assertion.deinit();
     var authorization: ?aegis.SecretBytes = null;
-    errdefer if (authorization) |*a| a.deinit();
+    errdefer if (authorization) |*a| a.deinit(gpa);
     if (maybe_client) |client| switch (client.credentials) {
         .none => try all.append(gpa, .{ .name = "client_id", .value = client.id }),
         .client_secret_post => |secret| try all.appendSlice(gpa, &.{
@@ -131,8 +133,8 @@ pub fn formRequest(gpa: std.mem.Allocator, io: std.Io, maybe_client: ?Client, pa
         },
     };
     var body = try encodeSecret(gpa, all.items);
-    errdefer body.deinit();
-    return .{ .body = body, .authorization = authorization };
+    errdefer body.deinit(gpa);
+    return .{ .body = body, .authorization = authorization, .gpa = gpa };
 }
 
 /// `pairs` form-encoded into wiped memory of exactly their length.
@@ -153,7 +155,7 @@ pub fn encodeSecret(gpa: std.mem.Allocator, pairs: []const form.Pair) std.mem.Al
 fn basic(gpa: std.mem.Allocator, id: []const u8, secret: []const u8) std.mem.Allocator.Error!aegis.SecretBytes {
     const pairs = [_]form.Pair{.{ .name = id, .value = secret }};
     var joined = try encodeSecret(gpa, &pairs);
-    defer joined.deinit();
+    defer joined.deinit(gpa);
     // `name=value` with the `=` made `:`.
     const raw = joined.exposeMut();
     raw[@intCast(form.encodedLength(&.{.{ .name = id, .value = "" }}) - 1)] = ':';

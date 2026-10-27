@@ -17,6 +17,8 @@ pub fn scratchLength(length: usize) usize {
 pub const Scratch = struct {
     stack: [scratchLength(2048)]u8,
     heap: ?aegis.SecretBytes,
+    /// What `heap` was allocated with.
+    gpa: std.mem.Allocator,
     fixed: std.heap.FixedBufferAllocator,
     /// The furthest the parser has written: a shrink or a free moves the
     /// fixed allocator's end back, never this.
@@ -27,6 +29,7 @@ pub const Scratch = struct {
     /// parse itself.
     pub fn init(s: *Scratch, gpa: std.mem.Allocator, length: usize) std.mem.Allocator.Error!void {
         s.heap = null;
+        s.gpa = gpa;
         s.high = 0;
         const capacity = scratchLength(length);
         if (capacity <= s.stack.len) {
@@ -40,7 +43,7 @@ pub const Scratch = struct {
     }
 
     pub fn deinit(s: *Scratch) void {
-        if (s.heap) |*h| return h.deinit();
+        if (s.heap) |*h| return h.deinit(s.gpa);
         std.crypto.secureZero(u8, s.stack[0..s.high]);
     }
 

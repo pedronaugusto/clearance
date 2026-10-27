@@ -88,9 +88,11 @@ pub const Grant = struct {
     expires_at: i64,
     /// Private: holds the strings above.
     storage: aegis.SecretBytes,
+    /// What the secret bytes were allocated with, which frees them.
+    gpa: std.mem.Allocator,
 
     pub fn deinit(g: *Grant) void {
-        g.storage.deinit();
+        g.storage.deinit(g.gpa);
         g.* = undefined;
     }
 
@@ -199,7 +201,7 @@ pub fn readIssued(gpa: std.mem.Allocator, status: u16, body: []const u8, request
     storage.resizeWithinCapacity(total) catch unreachable;
     const bytes = storage.exposeMut();
     @memcpy(bytes[0..issued.token.len], issued.token);
-    var grant: Grant = .{ .assertion = bytes[0..issued.token.len], .expires_at = registered.exp.?, .storage = storage };
+    var grant: Grant = .{ .assertion = bytes[0..issued.token.len], .expires_at = registered.exp.?, .storage = storage, .gpa = gpa };
     if (carried) |s| {
         @memcpy(bytes[issued.token.len..], s);
         grant.scope = bytes[issued.token.len..];

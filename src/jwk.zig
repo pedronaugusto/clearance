@@ -125,12 +125,14 @@ pub const KeySet = struct {
     /// `deinit`: it holds every secret member the document had, the ones
     /// left out among them.
     document: aegis.SecretBytes,
+    /// What the secret bytes were allocated with, which frees them.
+    gpa: std.mem.Allocator,
 
     /// Reads `{"keys":[...]}`, or a single JWK as a set of one.
     pub fn parse(gpa: std.mem.Allocator, document: []const u8, options: Options) ParseError!KeySet {
         const limit: usize = options.max_bytes.raw();
         if (document.len > limit) return error.TooLarge;
-        var set: KeySet = .{ .keys = &.{}, .skipped = .initFill(0), .arena = .init(gpa), .secrets = null, .document = try .init(gpa, document.len) };
+        var set: KeySet = .{ .keys = &.{}, .skipped = .initFill(0), .arena = .init(gpa), .secrets = null, .document = try .init(gpa, document.len), .gpa = gpa };
         errdefer set.deinit();
         const arena = set.arena.allocator();
         // The keys outlive the caller's document: strings read from it borrow the copy.
@@ -200,8 +202,8 @@ pub const KeySet = struct {
     }
 
     pub fn deinit(set: *KeySet) void {
-        if (set.secrets) |*s| s.deinit();
-        set.document.deinit();
+        if (set.secrets) |*s| s.deinit(set.gpa);
+        set.document.deinit(set.gpa);
         set.arena.deinit();
         set.* = undefined;
     }
@@ -271,7 +273,7 @@ pub const PrivateKey = struct {
         const limit: usize = options.max_bytes.raw();
         if (document.len > limit) return error.TooLarge;
         var text = try aegis.SecretBytes.init(gpa, document.len);
-        defer text.deinit();
+        defer text.deinit(gpa);
         // unreachable: a fresh allocation of the document's length
         text.replace(document) catch unreachable;
         var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -321,7 +323,7 @@ pub const PrivateKey = struct {
             length += base64url.decodedLength(member_text) catch return error.InvalidKey;
         };
         var numbers = try aegis.SecretBytes.init(gpa, length);
-        defer numbers.deinit();
+        defer numbers.deinit(gpa);
         // unreachable: the length is the capacity just allocated
         numbers.resizeWithinCapacity(length) catch unreachable;
         const storage = numbers.exposeMut();

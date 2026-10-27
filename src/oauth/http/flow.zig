@@ -382,7 +382,7 @@ pub const AuthorizationFlow = struct {
         const query = if (std.mem.findScalar(u8, redirect, '?') != null) authorize.queryOf(redirect) else redirect;
         // The code is a secret until spent: decoded into wiped memory.
         var scratch = aegis.SecretBytes.init(gpa, query.len) catch return error.OutOfMemory;
-        defer scratch.deinit();
+        defer scratch.deinit(gpa);
         // unreachable: the capacity was just allocated at this length
         scratch.resizeWithinCapacity(query.len) catch unreachable;
         const callback = try authorize.readCallback(query, .{
@@ -560,7 +560,7 @@ pub fn userinfo(comptime Claims: type, arena: std.mem.Allocator, io: std.Io, htt
             .bearer => blk: {
                 const prefix = "Bearer ";
                 var authorization = aegis.SecretBytes.init(arena, prefix.len + set.access_token.len) catch return error.OutOfMemory;
-                defer authorization.deinit();
+                defer authorization.deinit(arena);
                 // unreachable: the capacity was just allocated at this length
                 authorization.resizeWithinCapacity(prefix.len + set.access_token.len) catch unreachable;
                 @memcpy(authorization.exposeMut()[0..prefix.len], prefix);

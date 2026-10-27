@@ -60,9 +60,11 @@ pub const Authorization = struct {
     interval: u32,
     /// Private: holds every string above.
     storage: aegis.SecretBytes,
+    /// What the secret bytes were allocated with, which frees them.
+    gpa: std.mem.Allocator,
 
     pub fn deinit(a: *Authorization) void {
-        a.storage.deinit();
+        a.storage.deinit(a.gpa);
         a.* = undefined;
     }
 
@@ -158,6 +160,7 @@ pub fn readAuthorization(gpa: std.mem.Allocator, status: u16, body: []const u8, 
         .expires_at = now +| @as(i64, wire.expires_in),
         .interval = @max(1, wire.interval orelse default_interval),
         .storage = storage,
+        .gpa = gpa,
     } };
 }
 
