@@ -71,7 +71,7 @@ const now = std.Io.Clock.real.now(io);
 the header, the registered claims, the claims as `Claims` and the key that
 verified the token, or the error naming the check that refused it.
 
-Signing, here with an HMAC secret (a private JWK signs RS, PS, ES and EdDSA
+Signing, here with an HMAC secret (a private JWK signs RS, PS, ES, EdDSA and ML-DSA
 tokens the same way, read by `jwk.PrivateKey.parse` and given as
 `jws.Signer.fromJwk(&private, null)`, as does a cloak private key read from
 PEM or DER):
@@ -168,9 +168,10 @@ user's token at an enterprise's identity provider for an ID-JAG, and
 ## Scope
 
 In this release: JWS compact serialization with HS256/384/512, RS256/384/512,
-PS256/384/512, ES256, ES384, ES512 and EdDSA (Ed25519, under both its names); JWK
-and JWK sets (RSA, EC P-256, P-384 and P-521, OKP Ed25519, oct), and private JWKs
-read for signing (RSA with its CRT members, EC P-256, P-384 and P-521, Ed25519); thumbprints (RFC
+PS256/384/512, ES256, ES384, ES512, EdDSA (Ed25519, under both its names) and
+ML-DSA-44/65/87 (RFC 9964); JWK and JWK sets (RSA, EC P-256, P-384 and P-521,
+OKP Ed25519, AKP ML-DSA, oct), and private JWKs read for signing (RSA with its
+CRT members, EC P-256, P-384 and P-521, Ed25519, ML-DSA by its seed); thumbprints (RFC
 7638) and their URIs (RFC 9278); JWT claims and explicit typing; ID tokens
 (OpenID Connect Core 3.1.3.7, `at_hash`) and RFC 9068 access tokens. OAuth 2.1
 flows on uplink: discovery (RFC 8414, OpenID Connect, RFC 9728), the
@@ -214,7 +215,7 @@ std has no AES-192, and nothing needs it).
 ## Built with
 
 cloak verifies and signs (ECDSA in the fixed-width form JOSE uses, RSA
-PKCS#1 v1.5 and PSS, Ed25519), checks every RSA public key (the ROCA
+PKCS#1 v1.5 and PSS, Ed25519, ML-DSA), checks every RSA public key (the ROCA
 fingerprint among the checks) and makes a private key from a JWK's numbers; strand reads and writes JSON under limits;
 aegis wipes secrets and compares MACs in constant time; uplink's codecs
 parse URLs, challenges and `Cache-Control` and encode forms, and its client
