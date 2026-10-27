@@ -1,9 +1,9 @@
 //! clearance's benchmarks: JWT and JWS verification and signing per
-//! algorithm, key sets read, flattened JWS JSON verified and signed, DPoP proofs signed and verified, a logout token
+//! algorithm (ES512 on RFC 7520's P-521 key among them), key sets read, flattened JWS JSON verified and signed, DPoP proofs signed and verified, a logout token
 //! verified, JWE decrypted and encrypted (AES key wrap, RSA-OAEP-256, `dir`) and a nested ID token verified; and OAuth's
 //! messages: a token response read
 //! into a `TokenSet`, a device authorization read (RFC 8628), a revocation request written and answered (RFC 7009), a pushed request
-//! written and answered (RFC 9126), a UserInfo answer read, an authorization server's metadata read, an
+//! written and answered (RFC 9126), a request object signed (RFC 9101), a UserInfo answer read, an authorization server's metadata read, an
 //! authorization URL written with its PKCE verifier and state drawn. `bay bench` runs them in ReleaseFast and
 //! writes one JSON line per row to stdout; `bay test` runs each row once with
 //! `--smoke`. Timings are taken by hand, never in CI.
@@ -14,7 +14,7 @@ const shakedown = @import("shakedown");
 const provenance = @import("preflight_bench_options");
 
 const WorkloadError = clearance.jwt.VerifyError || clearance.jwe.DecryptError || clearance.jwe.EncryptError || clearance.id_token.VerifyError || clearance.dpop.VerifyError || clearance.logout.VerifyError || clearance.jwk.PrivateError || clearance.jwt.SignError || clearance.jwk.ParseError ||
-    oauth.token.ReadError || oauth.device.ReadError || oauth.revocation.ReadError || oauth.par.ReadError || oauth.userinfo.ReadError || oauth.client_auth.Error || oauth.metadata.ReadError || oauth.authorize.WriteError || error{Refused};
+    oauth.token.ReadError || oauth.device.ReadError || oauth.revocation.ReadError || oauth.par.ReadError || oauth.userinfo.ReadError || oauth.client_auth.Error || oauth.metadata.ReadError || oauth.authorize.WriteError || oauth.request_object.Error || error{Refused};
 const Row = shakedown.bench.Row(Bench, WorkloadError);
 
 const secret: [32]u8 = @splat(0x2a);
@@ -158,6 +158,65 @@ const Bench = struct {
             var w: std.Io.Writer = .fixed(&out);
             try clearance.jwt.sign(b.gpa, b.io, &w, .{}, .{ .exp = @as(i64, 4_000_000_000), .sub = "user-1" }, .{ .hmac = .{ .alg = .hs256, .secret = &secret } });
             b.sink +%= w.end;
+        }
+    }
+
+    /// RFC 7520 §4.3's P-521 key, and a token it signed.
+    fn setupEs512(b: *Bench) WorkloadError!void {
+        b.private = try clearance.jwk.PrivateKey.parse(b.gpa, @embedFile("data/es512.jwk.json"), .{});
+        b.token = .init(b.gpa);
+        const signer = clearance.jws.Signer.fromJwk(&b.private, .es512) catch return error.InvalidKey;
+        try clearance.jwt.sign(b.gpa, b.io, &b.token.writer, .{}, .{ .exp = @as(i64, 4_000_000_000), .sub = "user-1", .scope = "read write" }, signer);
+    }
+
+    fn teardownEs512(b: *Bench) WorkloadError!void {
+        b.token.deinit();
+        b.private.deinit();
+    }
+
+    fn signEs512(b: *Bench, units: u64) WorkloadError!void {
+        const signer = clearance.jws.Signer.fromJwk(&b.private, .es512) catch return error.InvalidKey;
+        var out: [1024]u8 = undefined;
+        for (0..units) |_| {
+            var w: std.Io.Writer = .fixed(&out);
+            try clearance.jwt.sign(b.gpa, b.io, &w, .{}, .{ .exp = @as(i64, 4_000_000_000), .sub = "user-1" }, signer);
+            b.sink +%= w.end;
+        }
+    }
+
+    fn verifyEs512(b: *Bench, units: u64) WorkloadError!void {
+        for (0..units) |_| {
+            const verified = try clearance.jwt.verify(Claims, b.token.written(), &.{b.private.public}, .{ .algorithms = &.{.es512} }, .{ .nanoseconds = 0 }, &b.scratch);
+            b.sink +%= verified.claims.scope.len;
+        }
+    }
+
+    /// The client's ES256 key (the DPoP one), which signs request objects.
+    fn setupSigner(b: *Bench) WorkloadError!void {
+        b.private = try clearance.jwk.PrivateKey.parse(b.gpa, es256_private_jwk, .{});
+    }
+
+    fn teardownSigner(b: *Bench) WorkloadError!void {
+        b.private.deinit();
+    }
+
+    /// An authorization request signed as a request object, as FAPI 2.0
+    /// pushes it.
+    fn writeRequestObject(b: *Bench, units: u64) WorkloadError!void {
+        const signer = clearance.jws.Signer.fromJwk(&b.private, .es256) catch return error.InvalidKey;
+        var out: std.Io.Writer.Allocating = .init(b.gpa);
+        defer out.deinit();
+        for (0..units) |_| {
+            out.clearRetainingCapacity();
+            try oauth.request_object.write(b.gpa, b.io, &out.writer, "https://server.example.com", .{
+                .client_id = "s6BhdRkqt3",
+                .redirect_uri = "https://client.example.org/cb",
+                .state = "af0ifjsldkj",
+                .code_challenge = "K2-ltc83acc4h0c9w6ESC_rEMTJ3bww-uCHaoeK1t8U",
+                .scope = "openid",
+                .resources = &.{"https://rs.example/mcp"},
+            }, .{ .signer = signer, .kid = "client-1" }, dpop_now);
+            b.sink +%= out.written().len;
         }
     }
 
@@ -408,6 +467,9 @@ const rows = [_]Row{
     .{ .name = "jwt/verify-hs256", .unit = "token", .run = Bench.verifyHs256, .fixture = .{ .lifetime = .row, .setup = Bench.setup, .teardown = Bench.teardown } },
     .{ .name = "jws/verify-eddsa", .unit = "token", .run = Bench.verifyEdDsa, .fixture = .{ .lifetime = .row, .setup = Bench.setup, .teardown = Bench.teardown } },
     .{ .name = "jwt/sign-hs256", .unit = "token", .run = Bench.signHs256, .fixture = .{ .lifetime = .row, .setup = Bench.setup, .teardown = Bench.teardown } },
+    .{ .name = "jwt/sign-es512", .unit = "token", .run = Bench.signEs512, .fixture = .{ .lifetime = .row, .setup = Bench.setupEs512, .teardown = Bench.teardownEs512 } },
+    .{ .name = "jwt/verify-es512", .unit = "token", .run = Bench.verifyEs512, .fixture = .{ .lifetime = .row, .setup = Bench.setupEs512, .teardown = Bench.teardownEs512 } },
+    .{ .name = "oauth/request-object-es256", .unit = "object", .run = Bench.writeRequestObject, .fixture = .{ .lifetime = .row, .setup = Bench.setupSigner, .teardown = Bench.teardownSigner } },
     .{ .name = "jwk/parse-ed25519-set", .unit = "set", .run = Bench.parseSet },
     .{ .name = "dpop/sign-proof-es256", .unit = "proof", .run = Bench.signProof, .fixture = .{ .lifetime = .row, .setup = Bench.setupDpop, .teardown = Bench.teardownDpop } },
     .{ .name = "dpop/verify-proof-es256", .unit = "proof", .run = Bench.verifyProof, .fixture = .{ .lifetime = .row, .setup = Bench.setupDpop, .teardown = Bench.teardownDpop } },

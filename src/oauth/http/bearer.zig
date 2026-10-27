@@ -54,7 +54,10 @@ pub const Request = struct {
     url: []const u8 = "",
     /// The TLS client certificate (DER) the connection proved, when it is
     /// mutual TLS (uplink's `server.Request.peer_certificate`): a token
-    /// bound to a certificate (RFC 8705 §3) must name this one.
+    /// bound to a certificate (RFC 8705 §3) must name this one. A resumed
+    /// TLS session proves no certificate (cloak keeps no peer's leaf across
+    /// resumption), so a certificate-bound token over one is refused: the
+    /// client sends it on a full handshake.
     client_certificate: ?[]const u8 = null,
 };
 

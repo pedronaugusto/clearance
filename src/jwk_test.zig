@@ -39,11 +39,15 @@ test "RFC 7520 3.3: the cookbook's RSA public key is read with its kid and use" 
     try std.testing.expectEqual(.sig, set.keys[0].use);
 }
 
-test "RFC 7520 3.1: a P-521 key is left out as unsupported, not an error" {
+test "RFC 7520 3.1: a P-521 key is read, its 66-byte coordinates one SEC 1 point" {
     var set = try jwk.KeySet.parse(gpa, @embedFile("testing/vectors/rfc7520/3_1.ec_public_key.json"), .{});
     defer set.deinit();
-    try std.testing.expectEqual(@as(usize, 0), set.keys.len);
-    try std.testing.expectEqual(@as(u16, 1), set.skipped.get(.unsupported));
+    try std.testing.expectEqual(@as(usize, 1), set.keys.len);
+    try std.testing.expectEqual(@as(u16, 0), set.skipped.get(.unsupported));
+    const ec = set.keys[0].material.ec;
+    try std.testing.expectEqual(.p521, ec.curve);
+    try std.testing.expectEqual(@as(usize, 1 + 2 * 66), ec.point.len);
+    try std.testing.expectEqual(@as(u8, 0x04), ec.point[0]);
 }
 
 test "a set keeps the keys it can use and counts the rest by reason" {

@@ -313,6 +313,7 @@ pub const AuthorizationFlow = struct {
                     error.OutOfMemory => error.OutOfMemory,
                     error.InvalidKey => error.InvalidKey,
                     error.SigningFailed => error.SigningFailed,
+                    error.EntropyUnavailable => error.EntropyUnavailable,
                 };
                 return par.requestObject(g, i, b.client, object.written(), .{ .issuer = b.issuer, .now = now });
             }

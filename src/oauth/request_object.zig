@@ -40,6 +40,9 @@ pub const Error = error{
     /// does not fit its algorithm.
     InvalidKey,
     SigningFailed,
+    /// The system's secure random source failed while drawing the
+    /// encryption's ephemeral key (ECDH-ES).
+    EntropyUnavailable,
 } || std.mem.Allocator.Error;
 
 /// Writes the request object of `request` for the server `issuer`: every
@@ -58,7 +61,8 @@ pub fn write(gpa: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, issuer: []
     try sign(gpa, io, &signed.writer, header, claims.written(), options.signer);
     jwe.encrypt(gpa, io, out, .{ .enc = encryption.enc, .cty = "JWT" }, signed.written(), &.{encryption.recipient}, .compact, .{}) catch |err| return switch (err) {
         error.OutOfMemory, error.WriteFailed => error.OutOfMemory,
-        error.InvalidKey, error.InvalidRecipients, error.UnsupportedAlgorithm => error.InvalidKey,
+        error.InvalidKey, error.InvalidRecipients => error.InvalidKey,
+        error.EntropyUnavailable => error.EntropyUnavailable,
     };
 }
 

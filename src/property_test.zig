@@ -7,6 +7,8 @@ const jwt = @import("jwt.zig");
 const jwk = @import("jwk.zig");
 const jwe = @import("jwe.zig");
 const Key = @import("Key.zig");
+const access_token = @import("access_token.zig");
+const base64url = @import("base64url.zig");
 const Algorithm = @import("Algorithm.zig").Algorithm;
 
 const all = std.enums.values(Algorithm);
@@ -314,4 +316,61 @@ test "any bytes are a nested JWT whose signed content verifies, or refused" {
     defer nested.deinit();
     try jwe.encrypt(gpa, std.testing.io, &nested.writer, .{ .enc = .a128gcm, .cty = "JWT" }, signed.written(), &.{.{ .alg = .a128kw, .key = .{ .key = Key.hmac(&kek) } }}, .compact, .{});
     try shake.check(gpa, NestedCase{ .nested = nested.written(), .signed = signed.written(), .secret = &secret, .kek = &kek }, anyNested, .{ .cases = 1000 });
+}
+
+/// A confirmation member of a token, against what the request proved: none,
+/// the proof's own hash, another hash, or text that is no hash.
+const Member = enum { absent, proved, other, unreadable };
+
+fn writeMember(w: *std.Io.Writer, first: *bool, name: []const u8, member: Member, proof: u8) !void {
+    if (member == .absent) return;
+    if (!first.*) try w.writeByte(',');
+    first.* = false;
+    try w.print("\"{s}\":\"", .{name});
+    const hash: [32]u8 = @splat(if (member == .proved) proof else 0x33);
+    if (member == .unreadable) try w.writeAll("x") else try base64url.encode(w, &hash);
+    try w.writeByte('"');
+}
+
+/// Any token binding against any proof: the token passes exactly when the
+/// model says, each `cnf` member named proved by the request (RFC 9449 §7.1:
+/// a DPoP proof only with a `jkt` token; RFC 8705 §3: an unbound token over
+/// mutual TLS passes) and no member clearance cannot check.
+fn anyBinding(_: void, c: *shake.Case) !void {
+    const proof: ?[32]u8 = if (shake.gen.boolean(c.source)) @splat(0x11) else null;
+    const mtls: ?[32]u8 = if (shake.gen.boolean(c.source)) @splat(0x22) else null;
+    const jkt = shake.gen.enumValue(c.source, Member);
+    const x5t = shake.gen.enumValue(c.source, Member);
+    const confirmed = shake.gen.boolean(c.source);
+    var claims: std.Io.Writer.Allocating = .init(c.gpa);
+    defer claims.deinit();
+    try claims.writer.writeAll("{\"iss\":\"https://as.example\",\"aud\":\"https://rs.example\",\"sub\":\"u\",\"client_id\":\"app\",\"exp\":1700000600,\"iat\":1699999990,\"jti\":\"j\"");
+    if (confirmed) {
+        try claims.writer.writeAll(",\"cnf\":{");
+        var first = true;
+        try writeMember(&claims.writer, &first, "jkt", jkt, 0x11);
+        try writeMember(&claims.writer, &first, "x5t#S256", x5t, 0x22);
+        try claims.writer.writeByte('}');
+    }
+    try claims.writer.writeByte('}');
+    const secret: [32]u8 = @splat(0x68);
+    var token: std.Io.Writer.Allocating = .init(c.gpa);
+    defer token.deinit();
+    try jws.sign(c.gpa, std.testing.io, &token.writer, .{ .typ = "at+jwt" }, claims.written(), .{ .hmac = .{ .alg = .hs256, .secret = &secret } });
+    var scratch: [2048]u8 = undefined;
+    const now: std.Io.Timestamp = .{ .nanoseconds = 1_700_000_000 * std.time.ns_per_s };
+    const accepted = if (access_token.verify(void, token.written(), &.{Key.hmac(&secret)}, .{
+        .algorithms = &.{.hs256},
+        .issuer = "https://as.example",
+        .audience = "https://rs.example",
+        .binding = .{ .dpop = proof, .mtls = mtls },
+    }, now, &scratch)) |_| true else |_| false;
+    const model = if (!confirmed) proof == null else (jkt != .absent or x5t != .absent) and
+        (if (proof == null) jkt == .absent else jkt == .proved) and
+        (x5t == .absent or (x5t == .proved and mtls != null));
+    if (accepted != model) return error.BindingModel;
+}
+
+test "any token binding passes exactly when every confirmation it names is the one the request proved" {
+    try shake.check(std.testing.allocator, {}, anyBinding, .{ .cases = 1000 });
 }

@@ -6,6 +6,7 @@ const oauth = @import("../oauth.zig");
 const form = @import("uplink.wire").form;
 const aegis = @import("aegis");
 const clearance = @import("clearance");
+const strand = @import("strand");
 
 const as_documents = [_][]const u8{
     "{\"issuer\":\"https://as.example\",\"token_endpoint\":\"https://as.example/token\",\"code_challenge_methods_supported\":[\"S256\"],\"authorization_response_iss_parameter_supported\":true}",
@@ -429,4 +430,61 @@ fn anyRedemption(_: void, c: *shake.Case) !void {
 
 test "any answer to a redemption is a Bearer token within the ID-JAG's scope, the server's error, or refused" {
     try shake.check(std.testing.allocator, {}, anyRedemption, .{ .cases = 1000 });
+}
+
+/// Any authorization request as a request object: it verifies under the
+/// client's key, typed, from the client to the issuer, and carries its
+/// state, scope, nonce and resources back exactly (one resource a string,
+/// several an array).
+fn anyRequestObject(_: void, c: *shake.Case) !void {
+    const resources = [_][]const u8{ "https://rs.example/a", "https://rs.example/b", "https://rs.example/c" };
+    const state = try shake.gen.string(c.source, c.gpa, .{ .max_len = 64 });
+    defer c.gpa.free(state);
+    const scope = try shake.gen.string(c.source, c.gpa, .{ .kind = .ascii, .max_len = 32 });
+    defer c.gpa.free(scope);
+    const nonce = try shake.gen.string(c.source, c.gpa, .{ .max_len = 32 });
+    defer c.gpa.free(nonce);
+    const with_scope = shake.gen.boolean(c.source);
+    const with_nonce = shake.gen.boolean(c.source);
+    const count = shake.gen.intRange(c.source, usize, 0, resources.len);
+    const request: oauth.authorize.Request = .{
+        .client_id = "s6BhdRkqt3",
+        .redirect_uri = "https://client.example.org/cb",
+        .state = state,
+        .code_challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+        .scope = if (with_scope) scope else null,
+        .resources = resources[0..count],
+        .nonce = if (with_nonce) nonce else null,
+    };
+    const secret: [32]u8 = @splat(0x52);
+    const now: std.Io.Timestamp = .{ .nanoseconds = 1_700_000_000 * std.time.ns_per_s };
+    var out: std.Io.Writer.Allocating = .init(c.gpa);
+    defer out.deinit();
+    try oauth.request_object.write(c.gpa, std.testing.io, &out.writer, "https://server.example.com", request, .{ .signer = .{ .hmac = .{ .alg = .hs256, .secret = &secret } } }, now);
+    const Claims = struct { state: []const u8, scope: ?[]const u8 = null, nonce: ?[]const u8 = null, resource: ?strand.json.Raw = null };
+    const scratch = try c.gpa.alloc(u8, clearance.jws.scratchLength(out.written().len));
+    defer c.gpa.free(scratch);
+    const v = try clearance.jwt.verify(Claims, out.written(), &.{clearance.Key.hmac(&secret)}, .{
+        .algorithms = &.{.hs256},
+        .issuer = "s6BhdRkqt3",
+        .audience = "https://server.example.com",
+        .typ = oauth.request_object.media_type,
+        .required = .{ .iss = true, .aud = true, .exp = true, .iat = true, .nbf = true, .jti = true },
+    }, now, scratch);
+    if (!std.mem.eql(u8, v.claims.state, state)) return error.WrongState;
+    if (with_scope != (v.claims.scope != null) or (with_scope and !std.mem.eql(u8, v.claims.scope.?, scope))) return error.WrongScope;
+    if (with_nonce != (v.claims.nonce != null) or (with_nonce and !std.mem.eql(u8, v.claims.nonce.?, nonce))) return error.WrongNonce;
+    var arena: std.heap.ArenaAllocator = .init(c.gpa);
+    defer arena.deinit();
+    const read: []const []const u8 = if (v.claims.resource) |raw| switch (count) {
+        0 => return error.WrongResources,
+        1 => &.{try raw.parse([]const u8, arena.allocator(), .{})},
+        else => try raw.parse([]const []const u8, arena.allocator(), .{}),
+    } else &.{};
+    if (read.len != count) return error.WrongResources;
+    for (read, resources[0..count]) |got, want| if (!std.mem.eql(u8, got, want)) return error.WrongResources;
+}
+
+test "any authorization request is a request object that verifies and carries its parameters back exactly" {
+    try shake.check(std.testing.allocator, {}, anyRequestObject, .{ .cases = 500 });
 }

@@ -150,18 +150,21 @@ pub fn verify(comptime Extra: type, token: []const u8, keys: []const Key, expect
 fn checkBinding(arena: std.mem.Allocator, cnf: ?strand.json.Raw, binding: Binding) error{ BoundToken, WrongBinding, InvalidClaims }!void {
     const raw = cnf orelse return holds(binding, null, null, false);
     const c = raw.parse(Confirmation, arena, .{ .ignore_unknown_fields = true }) catch return error.InvalidClaims;
-    const jkt = try hash(c.jkt);
-    const x5t = try hash(c.@"x5t#S256");
-    return holds(binding, jkt, x5t, jkt == null and x5t == null);
+    const jkt = hash(c.jkt);
+    const x5t = hash(c.@"x5t#S256");
+    // A member that is no SHA-256 binds the token to nothing a request can
+    // prove, as a confirmation method clearance cannot check does.
+    const unreadable = (c.jkt != null and jkt == null) or (c.@"x5t#S256" != null and x5t == null);
+    return holds(binding, jkt, x5t, unreadable or (c.jkt == null and c.@"x5t#S256" == null));
 }
 
-/// A confirmation member's SHA-256, decoded; a member that is not one is
-/// a token bound to nothing a request can prove.
-fn hash(member: ?[]const u8) error{WrongBinding}!?[32]u8 {
+/// A confirmation member's SHA-256, decoded: null when it is absent or is
+/// not one.
+fn hash(member: ?[]const u8) ?[32]u8 {
     const text = member orelse return null;
     var decoded: [32]u8 = undefined;
-    const bytes = base64url.decode(&decoded, text) catch return error.WrongBinding;
-    if (bytes.len != 32) return error.WrongBinding;
+    const bytes = base64url.decode(&decoded, text) catch return null;
+    if (bytes.len != 32) return null;
     return decoded;
 }
 

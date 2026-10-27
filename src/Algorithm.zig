@@ -261,7 +261,7 @@ test "names are the registered ones and parse back exactly" {
     }
     try std.testing.expectEqual(@as(?Algorithm, null), Algorithm.parse("none"));
     try std.testing.expectEqual(@as(?Algorithm, null), Algorithm.parse("hs256"));
-    try std.testing.expectEqual(@as(?Algorithm, null), Algorithm.parse("ES512"));
+    try std.testing.expectEqual(@as(?Algorithm, null), Algorithm.parse("ES256K"));
 }
 
 test "JWE names are the registered ones and parse back; RSA1_5 and the A192 variants spell nothing" {
