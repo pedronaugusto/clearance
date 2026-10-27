@@ -437,3 +437,79 @@ test "JWE: encrypt to each kind of recipient, and to three at once, decrypts bac
     try std.testing.expectError(error.InvalidKey, jwe.encrypt(gpa, io, &out.writer, .{ .enc = .a128gcm }, message, &.{.{ .alg = .a128kw, .key = .{ .key = gcm.set.?.keys[0] } }}, .compact, .{}));
     try std.testing.expectError(error.InvalidKey, jwe.encrypt(gpa, io, &out.writer, .{ .enc = .a128gcm }, message, &.{.{ .alg = .rsa_oaep, .key = .{ .password = .{ .password = "p" } } }}, .compact, .{}));
 }
+
+/// RFC 7748 §6.1's second key pair (Bob's), as an X25519 JWK.
+const x25519_jwk = "{\"kty\":\"OKP\",\"crv\":\"X25519\",\"d\":\"XasIfmJKikt54X-Lg4AO5m87sSkmGLb9HC-LJ_-I4Os\",\"x\":\"3p7bfXt9wbTTW2HC7OQ1Nz-DQ8hbeGdNrfx-FG-IK08\"}";
+
+/// The token's protected header, decoded, into `arena`.
+fn protectedHeader(arena: std.mem.Allocator, token: []const u8) !std.json.Value {
+    const part = token[0 .. std.mem.findScalar(u8, token, '.') orelse return error.TestUnexpectedResult];
+    const json = try arena.alloc(u8, try std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(part));
+    try std.base64.url_safe_no_pad.Decoder.decode(json, part);
+    return std.json.parseFromSliceLeaky(std.json.Value, arena, json, .{});
+}
+
+test "JWE: ECDH-ES encryption on P-256, P-384 and X25519, direct and with key wrap, decrypts back under a fresh ephemeral key each time" {
+    var p384_vector = try Vector.load("5_4.key_agreement_with_key_wrapping_using_ecdh-es_and_aes-keywrap_with_aes-gcm.json");
+    defer p384_vector.deinit();
+    var p256_vector = try Vector.load("5_5.key_agreement_using_ecdh-es_with_aes-cbc-hmac-sha2.json");
+    defer p256_vector.deinit();
+    var held = [_]Held{
+        try hold(try stringify(p384_vector.arena.allocator(), p384_vector.get(&.{ "input", "key" }).?)),
+        try hold(try stringify(p256_vector.arena.allocator(), p256_vector.get(&.{ "input", "key" }).?)),
+        try hold(x25519_jwk),
+    };
+    defer for (&held) |*h| h.deinit();
+    const message = "agreed with a key made for this message";
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    for (&held) |*h| {
+        for ([_]jwe.KeyManagement{ .ecdh_es, .ecdh_es_a128kw, .ecdh_es_a256kw }) |alg| {
+            for ([_]jwe.ContentEncryption{ .a128gcm, .a256cbc_hs512 }) |enc| {
+                var epks: [2]std.json.Value = undefined;
+                for (&epks) |*epk| {
+                    var out: std.Io.Writer.Allocating = .init(gpa);
+                    defer out.deinit();
+                    try jwe.encrypt(gpa, io, &out.writer, .{ .enc = enc }, message, &.{.{ .alg = alg, .key = .{ .key = h.private.?.public } }}, .compact, .{});
+                    const token = out.written();
+                    const plain = try decrypted(token, &.{h.key});
+                    defer gpa.free(plain);
+                    try std.testing.expectEqualStrings(message, plain);
+                    // Direct agreement carries no encrypted key; key wrap does.
+                    var parts = std.mem.splitScalar(u8, token, '.');
+                    _ = parts.next();
+                    try std.testing.expectEqual(alg == .ecdh_es, parts.next().?.len == 0);
+                    epk.* = (try protectedHeader(arena, token)).object.get("epk").?;
+                }
+                const a = try stringify(arena, epks[0]);
+                const b = try stringify(arena, epks[1]);
+                try std.testing.expect(!std.mem.eql(u8, a, b));
+            }
+        }
+    }
+}
+
+test "JWE: RFC 7520 §5.4 encrypted with its ephemeral key wraps its content key byte for byte, and its epk is the example's" {
+    const name = "5_4.key_agreement_with_key_wrapping_using_ecdh-es_and_aes-keywrap_with_aes-gcm.json";
+    var v = try Vector.load(name);
+    defer v.deinit();
+    const arena = v.arena.allocator();
+    var recipient = try hold(try stringify(arena, v.get(&.{ "input", "key" }).?));
+    defer recipient.deinit();
+    // The content key, the ephemeral private key, then the content's IV.
+    var drawn = try script(arena, &.{ v.text(&.{ "generated", "cek" }), v.text(&.{ "encrypting_key", "epk", "d" }), v.text(&.{ "generated", "iv" }) });
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try jwe.encryptScripted(gpa, &drawn, &out.writer, .{ .enc = .a128gcm }, v.text(&.{ "input", "plaintext" }), &.{.{ .alg = .ecdh_es_a128kw, .key = .{ .key = recipient.private.?.public } }}, .compact, .{});
+    try std.testing.expectEqual(@as(usize, 0), drawn.len);
+    const token = out.written();
+    var parts = std.mem.splitScalar(u8, token, '.');
+    _ = parts.next();
+    try std.testing.expectEqualStrings(v.text(&.{ "encrypting_key", "encrypted_key" }), parts.next().?);
+    const epk = (try protectedHeader(arena, token)).object.get("epk").?.object;
+    for ([_][]const u8{ "kty", "crv", "x", "y" }) |member| try std.testing.expectEqualStrings(v.text(&.{ "encrypting_key", "epk", member }), epk.get(member).?.string);
+    const plain = try decrypted(token, &.{recipient.key});
+    defer gpa.free(plain);
+    try std.testing.expectEqualStrings(v.text(&.{ "input", "plaintext" }), plain);
+}
