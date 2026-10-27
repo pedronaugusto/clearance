@@ -168,9 +168,9 @@ user's token at an enterprise's identity provider for an ID-JAG, and
 ## Scope
 
 In this release: JWS compact serialization with HS256/384/512, RS256/384/512,
-PS256/384/512, ES256, ES384 and EdDSA (Ed25519, under both its names); JWK
-and JWK sets (RSA, EC P-256 and P-384, OKP Ed25519, oct), and private JWKs
-read for signing (RSA with its CRT members, EC P-256 and P-384, Ed25519); thumbprints (RFC
+PS256/384/512, ES256, ES384, ES512 and EdDSA (Ed25519, under both its names); JWK
+and JWK sets (RSA, EC P-256, P-384 and P-521, OKP Ed25519, oct), and private JWKs
+read for signing (RSA with its CRT members, EC P-256, P-384 and P-521, Ed25519); thumbprints (RFC
 7638) and their URIs (RFC 9278); JWT claims and explicit typing; ID tokens
 (OpenID Connect Core 3.1.3.7, `at_hash`) and RFC 9068 access tokens. OAuth 2.1
 flows on uplink: discovery (RFC 8414, OpenID Connect, RFC 9728), the
@@ -186,10 +186,15 @@ revocation (RFC 7009), and DPoP (RFC 9449): proofs written and verified,
 tokens bound to the client's key, the servers' nonces kept, a replay set for
 a resource server's proofs, pushed authorization requests (RFC 9126), OpenID Connect's UserInfo with the
 subject held to the ID token's, and OpenID Connect logout (RP-initiated,
-back-channel logout tokens verified once, front-channel). JWE (RFC 7516,
+back-channel logout tokens verified once, front-channel), mutual-TLS client
+authentication and certificate-bound tokens (RFC 8705: `tls_client_auth`,
+`self_signed_tls_client_auth`, the server's `mtls_endpoint_aliases`, a
+resource server's check of `x5t#S256`), and JWT-secured authorization requests
+(RFC 9101: request objects signed, then encrypted when the server asks, by
+value or pushed). JWE (RFC 7516,
 RFC 7518), the safe subset, decrypted and encrypted in every serialization:
 RSA-OAEP, AES key wrap and AES-GCM key wrap, `dir`, ECDH-ES (direct and with
-key wrap, on P-256, P-384 and X25519) and PBES2; A128GCM, A256GCM and the
+key wrap, on P-256, P-384, P-521 and X25519) and PBES2; A128GCM, A256GCM and the
 AES-CBC-HMAC pairs; nested JWTs and encrypted ID tokens and UserInfo
 answers. Their messages: RFC 8414 and OpenID Connect Discovery metadata, RFC 9728 protected
 resource metadata, PKCE (S256), the authorization request with RFC 8707
@@ -197,15 +202,14 @@ resources and its callback with RFC 9207's `iss`, the authorization code,
 refresh, client credentials, token exchange (RFC 8693) and JWT-bearer
 grants, client authentication (none, `client_secret_basic`,
 `client_secret_post`, `private_key_jwt` with the key in memory or an external
-signer, `client_secret_jwt`), RFC 7591
+signer, `client_secret_jwt`, `tls_client_auth`, `self_signed_tls_client_auth`), RFC 7591
 registration, client ID metadata documents, RFC 7662 introspection, RFC 6750
 challenges with `resource_metadata`.
 
 Not built, by decision: an authorization server; ES256K and Ed448; rich
 authorization requests (RFC 9396), JARM and CIBA; JWE's RSA1_5 and `zip`,
 and its 192-bit AES algorithms (A192KW, A192GCMKW, A192GCM, A192CBC-HS384:
-std has no AES-192, and nothing needs it). Not built yet: mTLS client
-authentication and bound tokens (RFC 8705), JAR, ES512.
+std has no AES-192, and nothing needs it).
 
 ## Built with
 
