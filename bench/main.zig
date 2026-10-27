@@ -1,5 +1,5 @@
 //! clearance's benchmarks: JWT and JWS verification and signing per
-//! algorithm (ES512 on RFC 7520's P-521 key among them), key sets read, flattened JWS JSON verified and signed, DPoP proofs signed and verified, a logout token
+//! algorithm (ES512 on RFC 7520's P-521 key and ML-DSA-65 on RFC 9964's key among them), key sets read, flattened JWS JSON verified and signed, DPoP proofs signed and verified, a logout token
 //! verified, JWE decrypted and encrypted (AES key wrap, RSA-OAEP-256, `dir`) and a nested ID token verified; and OAuth's
 //! messages: a token response read
 //! into a `TokenSet`, a device authorization read (RFC 8628), a revocation request written and answered (RFC 7009), a pushed request
@@ -187,6 +187,38 @@ const Bench = struct {
     fn verifyEs512(b: *Bench, units: u64) WorkloadError!void {
         for (0..units) |_| {
             const verified = try clearance.jwt.verify(Claims, b.token.written(), &.{b.private.public}, .{ .algorithms = &.{.es512} }, .{ .nanoseconds = 0 }, &b.scratch);
+            b.sink +%= verified.claims.scope.len;
+        }
+    }
+
+    /// RFC 9964 A.1's ML-DSA-65 key, and a token it signed.
+    fn setupMlDsa65(b: *Bench) WorkloadError!void {
+        b.private = try clearance.jwk.PrivateKey.parse(b.gpa, @embedFile("data/ml_dsa_65.jwk.json"), .{});
+        b.token = .init(b.gpa);
+        const signer = clearance.jws.Signer.fromJwk(&b.private, null) catch return error.InvalidKey;
+        try clearance.jwt.sign(b.gpa, b.io, &b.token.writer, .{}, .{ .exp = @as(i64, 4_000_000_000), .sub = "user-1", .scope = "read write" }, signer);
+        b.json_scratch = try b.gpa.alloc(u8, clearance.jws.scratchLength(b.token.written().len));
+    }
+
+    fn teardownMlDsa65(b: *Bench) WorkloadError!void {
+        b.gpa.free(b.json_scratch);
+        b.token.deinit();
+        b.private.deinit();
+    }
+
+    fn signMlDsa65(b: *Bench, units: u64) WorkloadError!void {
+        const signer = clearance.jws.Signer.fromJwk(&b.private, null) catch return error.InvalidKey;
+        var out: [8192]u8 = undefined;
+        for (0..units) |_| {
+            var w: std.Io.Writer = .fixed(&out);
+            try clearance.jwt.sign(b.gpa, b.io, &w, .{}, .{ .exp = @as(i64, 4_000_000_000), .sub = "user-1" }, signer);
+            b.sink +%= w.end;
+        }
+    }
+
+    fn verifyMlDsa65(b: *Bench, units: u64) WorkloadError!void {
+        for (0..units) |_| {
+            const verified = try clearance.jwt.verify(Claims, b.token.written(), &.{b.private.public}, .{ .algorithms = &.{.ml_dsa_65} }, .{ .nanoseconds = 0 }, b.json_scratch);
             b.sink +%= verified.claims.scope.len;
         }
     }
@@ -469,6 +501,8 @@ const rows = [_]Row{
     .{ .name = "jwt/sign-hs256", .unit = "token", .run = Bench.signHs256, .fixture = .{ .lifetime = .row, .setup = Bench.setup, .teardown = Bench.teardown } },
     .{ .name = "jwt/sign-es512", .unit = "token", .run = Bench.signEs512, .fixture = .{ .lifetime = .row, .setup = Bench.setupEs512, .teardown = Bench.teardownEs512 } },
     .{ .name = "jwt/verify-es512", .unit = "token", .run = Bench.verifyEs512, .fixture = .{ .lifetime = .row, .setup = Bench.setupEs512, .teardown = Bench.teardownEs512 } },
+    .{ .name = "jwt/sign-ml-dsa-65", .unit = "token", .run = Bench.signMlDsa65, .fixture = .{ .lifetime = .row, .setup = Bench.setupMlDsa65, .teardown = Bench.teardownMlDsa65 } },
+    .{ .name = "jwt/verify-ml-dsa-65", .unit = "token", .run = Bench.verifyMlDsa65, .fixture = .{ .lifetime = .row, .setup = Bench.setupMlDsa65, .teardown = Bench.teardownMlDsa65 } },
     .{ .name = "oauth/request-object-es256", .unit = "object", .run = Bench.writeRequestObject, .fixture = .{ .lifetime = .row, .setup = Bench.setupSigner, .teardown = Bench.teardownSigner } },
     .{ .name = "jwk/parse-ed25519-set", .unit = "set", .run = Bench.parseSet },
     .{ .name = "dpop/sign-proof-es256", .unit = "proof", .run = Bench.signProof, .fixture = .{ .lifetime = .row, .setup = Bench.setupDpop, .teardown = Bench.teardownDpop } },
