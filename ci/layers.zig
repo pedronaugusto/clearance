@@ -2,7 +2,7 @@
 const gantry = @import("gantry");
 
 pub const layers: []const gantry.rules.Layer = &.{
-    .{ .name = "codecs", .patterns = &.{"src/base64url.zig"} },
+    .{ .name = "codecs", .patterns = &.{ "src/base64url.zig", "src/time.zig" } },
     .{ .name = "algorithms", .patterns = &.{"src/Algorithm.zig"} },
     .{ .name = "keys", .patterns = &.{ "src/Key.zig", "src/jwk.zig" } },
     .{ .name = "JWS", .patterns = &.{"src/jws.zig"} },

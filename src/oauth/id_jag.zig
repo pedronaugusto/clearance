@@ -16,6 +16,7 @@
 //! it came straight from the identity provider over TLS, and its keys are
 //! the identity provider's arrangement with that server, not the client's.
 const std = @import("std");
+const time = @import("clearance").time;
 const aegis = @import("aegis");
 const strand = @import("strand");
 const clearance = @import("clearance");
@@ -98,7 +99,7 @@ pub const Grant = struct {
 
     /// Whether it has expired at `now`: a redemption would be refused.
     pub fn expired(g: *const Grant, at: std.Io.Timestamp) bool {
-        return seconds(at) >= g.expires_at;
+        return time.unixSeconds(at) >= g.expires_at;
     }
 
     /// The JWT-bearer grant that redeems it. Only the assertion carries
@@ -159,11 +160,12 @@ pub fn readIssued(gpa: std.mem.Allocator, status: u16, body: []const u8, request
     if (!std.mem.eql(u8, issued.issued_token_type, exchange.token_type.id_jag)) return error.NotIdJag;
     if (!std.ascii.eqlIgnoreCase(issued.token_type, "N_A")) return error.NotIdJag;
 
-    const scratch = gpa.alloc(u8, clearance.jws.scratchLength(issued.token.len)) catch return error.OutOfMemory;
-    defer {
-        std.crypto.secureZero(u8, scratch);
-        gpa.free(scratch);
-    }
+    const length = clearance.jws.scratchLength(issued.token.len);
+    var scratch_owner = aegis.SecretBytes.init(gpa, length) catch return error.OutOfMemory;
+    defer scratch_owner.deinit(gpa);
+    // unreachable: the capacity was just allocated at this length
+    scratch_owner.resizeWithinCapacity(length) catch unreachable;
+    const scratch = scratch_owner.exposeMut();
     const read = try clearance.jwt.inspect(Claims, issued.token, .{
         .issuer = request.idp_issuer,
         .audience = request.audience,
@@ -177,7 +179,7 @@ pub fn readIssued(gpa: std.mem.Allocator, status: u16, body: []const u8, request
     if (registered.aud.values.len != 1) return error.WrongAudience;
     if (blank(registered.sub.?) or blank(registered.jti.?)) return error.MissingClaim;
     const leeway: i64 = options.leeway.raw();
-    if (registered.iat.? > seconds(options.now) +| leeway) return error.TooOld;
+    if (registered.iat.? > time.unixSeconds(options.now) +| leeway) return error.TooOld;
     const claims = read.claims;
     var rest: std.heap.FixedBufferAllocator = .init(read.rest);
     if (!std.mem.eql(u8, claims.client_id orelse return error.MissingClaim, request.client_id)) return error.WrongClient;
@@ -260,10 +262,6 @@ pub fn readRedemption(gpa: std.mem.Allocator, status: u16, body: []const u8, gra
     const without = try token.TokenSet.init(gpa, kept);
     set.deinit();
     return .{ .tokens = without };
-}
-
-fn seconds(at: std.Io.Timestamp) i64 {
-    return @intCast(@divFloor(at.nanoseconds, std.time.ns_per_s));
 }
 
 fn blank(text: []const u8) bool {

@@ -5,6 +5,8 @@ const builtin = @import("builtin");
 
 /// Base64url without padding, strict, as JOSE writes binary members.
 pub const base64url = @import("base64url.zig");
+/// JOSE's NumericDate: whole seconds since the Unix epoch, from a timestamp.
+pub const time = @import("time.zig");
 /// The JWS algorithms clearance signs and verifies; `none` is not one.
 pub const Algorithm = @import("Algorithm.zig").Algorithm;
 /// JWE's key management and content encryption; RSA1_5 is not one.
@@ -31,4 +33,5 @@ pub const logout = @import("logout.zig");
 
 test {
     if (builtin.is_test) _ = @import("tests.zig");
+    _ = time;
 }

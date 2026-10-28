@@ -2,6 +2,7 @@
 //! another. The request is a grant like any other (`token.Grant`, written by
 //! `token.request`); this is what it carries and how the answer is read.
 const std = @import("std");
+const time = @import("clearance").time;
 const aegis = @import("aegis");
 const strand = @import("strand");
 const errors = @import("errors.zig");
@@ -128,7 +129,7 @@ pub fn readResponse(gpa: std.mem.Allocator, status: u16, body: []const u8, optio
         copy.* = bytes[at..][0..s.len];
         at += s.len;
     }
-    const now: i64 = @intCast(@divFloor(options.now.nanoseconds, std.time.ns_per_s));
+    const now: i64 = time.unixSeconds(options.now);
     return .{ .issued = .{
         .token = copies[0],
         .issued_token_type = copies[1],

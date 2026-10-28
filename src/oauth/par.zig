@@ -4,6 +4,7 @@
 //! parameters are `authorize.Params`, the list the URL itself is written
 //! from, so a pushed request and a URL never differ.
 const std = @import("std");
+const time = @import("clearance").time;
 const aegis = @import("aegis");
 const strand = @import("strand");
 const form = @import("uplink.wire").form;
@@ -90,7 +91,7 @@ pub fn readResponse(status: u16, body: []const u8, options: ReadOptions) ReadErr
     const uri = wire.request_uri;
     if (uri.len == 0 or uri.len > max_request_uri or wire.expires_in == 0) return error.InvalidResponse;
     for (uri) |c| if (c < 0x21 or c > 0x7e) return error.InvalidResponse;
-    const now: i64 = @intCast(@divFloor(options.now.nanoseconds, std.time.ns_per_s));
+    const now: i64 = time.unixSeconds(options.now);
     return .{ .pushed = .{ .request_uri = .init(uri), .expires_at = now +| @as(i64, wire.expires_in) } };
 }
 

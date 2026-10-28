@@ -22,11 +22,27 @@ pub const max_origins = 8;
 /// share between tasks.
 pub const Session = struct {
     key: proofs.Key,
-    mutex: std.Io.Mutex = .init,
-    /// Guarded by `mutex`.
-    slots: [max_origins]Slot = @splat(.{}),
-    /// Guarded by `mutex`: the slot the next new origin takes.
-    next: u8 = 0,
+    /// The nonces each origin gave.
+    origins: aegis.BlockingGuarded(Origins) = .init(.{}),
+
+    const Origins = struct {
+        slots: [max_origins]Slot = @splat(.{}),
+        /// The slot the next new origin takes.
+        next: u8 = 0,
+
+        fn find(o: *Origins, origin: []const u8) ?*Slot {
+            for (&o.slots) |*slot| if (slot.used and std.mem.eql(u8, slot.origin.slice(), origin)) return slot;
+            return null;
+        }
+
+        /// The next slot, in turn, given to `origin`.
+        fn claim(o: *Origins, origin: []const u8) *Slot {
+            const taken = &o.slots[o.next];
+            o.next = (o.next + 1) % max_origins;
+            taken.* = .{ .origin = .init(origin), .used = true };
+            return taken;
+        }
+    };
 
     const Slot = struct {
         origin: errors.Text(256) = .{},
@@ -51,20 +67,11 @@ pub const Session = struct {
         const origin = url.originOf(target) catch return;
         if (nonce.len == 0 or nonce.len > 256 or origin.len > 256) return;
         for (nonce) |c| if (c < 0x21 or c > 0x7e) return;
-        s.mutex.lockUncancelable(io);
-        defer s.mutex.unlock(io);
-        const slot = s.find(origin) orelse blk: {
-            const taken = &s.slots[s.next];
-            s.next = (s.next + 1) % max_origins;
-            taken.* = .{ .origin = .init(origin), .used = true };
-            break :blk taken;
-        };
+        var held = s.origins.acquireUncancelable(io);
+        defer held.deinit(io);
+        const o = held.value();
+        const slot = o.find(origin) orelse o.claim(origin);
         slot.nonce.set(nonce);
-    }
-
-    fn find(s: *Session, origin: []const u8) ?*Slot {
-        for (&s.slots) |*slot| if (slot.used and std.mem.eql(u8, slot.origin.slice(), origin)) return slot;
-        return null;
     }
 
     /// Writes a proof for `method` to `target`, with `access_token`'s hash
@@ -73,9 +80,9 @@ pub const Session = struct {
     pub fn proof(s: *Session, gpa: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, method: []const u8, target: []const u8, access_token: ?[]const u8) ProofError!void {
         var nonce: errors.Text(256) = .{};
         if (url.originOf(target)) |origin| {
-            s.mutex.lockUncancelable(io);
-            defer s.mutex.unlock(io);
-            if (s.find(origin)) |slot| nonce = slot.nonce;
+            var held = s.origins.acquireUncancelable(io);
+            defer held.deinit(io);
+            if (held.value().find(origin)) |slot| nonce = slot.nonce;
         } else |_| {}
         proofs.writeProof(gpa, io, out, &s.key, .{
             .htm = method,

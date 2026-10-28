@@ -8,6 +8,7 @@
 //! why (RFC 6750 §3, RFC 9449 §7.1) and where this resource's metadata is
 //! (RFC 9728 §5.1).
 const std = @import("std");
+const time = @import("clearance").time;
 const uplink = @import("uplink");
 const clearance = @import("clearance");
 const challenge = @import("../challenge.zig");
@@ -66,7 +67,7 @@ pub const Dpop = struct {
     /// The asymmetric algorithms accepted for proofs.
     algorithms: []const Algorithm,
     /// Where proofs' `jti`s are kept for their life (RFC 9449 §11.1).
-    replay: ?clearance.jwt.Replay = null,
+    replay: ?*clearance.jwt.Replay = null,
     max_age: clearance.jwt.Duration = .literal("60s"),
     /// The nonce proofs must carry, when the resource gives them (§9); the
     /// caller rotates it. A proof without it is answered `use_dpop_nonce`
@@ -244,7 +245,7 @@ pub const Verifier = struct {
             },
             .introspected => |i| i,
         };
-        const seconds: i64 = @intCast(@divFloor(now.nanoseconds, std.time.ns_per_s));
+        const seconds: i64 = time.unixSeconds(now);
         const leeway: i64 = v.leeway.raw();
         if (!i.active) return v.refuse(arena, .unauthorized, scheme, .invalid_token, "inactive", null);
         access_token.holds(binding, i.jkt, i.x5t_s256, i.bound and i.jkt == null and i.x5t_s256 == null) catch |err| return v.refuse(arena, .unauthorized, scheme, .invalid_token, switch (err) {

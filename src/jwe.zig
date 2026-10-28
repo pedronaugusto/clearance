@@ -13,6 +13,7 @@
 //! in `Diagnostics` only. Content keys and derived keys live in wiped memory;
 //! the plaintext lives in the caller's scratch buffer.
 const std = @import("std");
+const aegis = @import("aegis");
 const strand = @import("strand");
 const cloak = @import("cloak");
 const base64url = @import("base64url.zig");
@@ -407,8 +408,9 @@ fn decryptRecipient(io: std.Io, arena: std.mem.Allocator, shared: *const Shared,
     const encrypted_key = try decodeAlloc(arena, r.encrypted_key);
     if (shared.iv_bytes.len != enc.ivLength() or shared.tag_bytes.len != enc.tagLength()) return error.InvalidHeader;
 
-    var cek_buffer: [max_cek]u8 = undefined;
-    defer std.crypto.secureZero(u8, &cek_buffer);
+    var cek_buffer_owner: aegis.Secret([max_cek]u8) = .init(undefined);
+    defer cek_buffer_owner.deinit();
+    const cek_buffer = cek_buffer_owner.exposeMut();
     const cek = cek_buffer[0..enc.keyLength()];
     try recoverKey(io, arena, key, alg, enc, joint, encrypted_key, options, cek, diagnostics);
 
@@ -507,13 +509,15 @@ fn recoverKey(io: std.Io, arena: std.mem.Allocator, key: *const DecryptionKey, a
         },
         .rsa => {
             const private = key.material.private.key;
-            var noise: [cloak.PrivateKey.max_noise]u8 = undefined;
-            defer std.crypto.secureZero(u8, &noise);
+            var noise_owner: aegis.Secret([cloak.PrivateKey.max_noise]u8) = .init(undefined);
+            defer noise_owner.deinit();
+            const noise = noise_owner.exposeMut();
             const noise_length = private.noiseLength();
             io.random(noise[0..noise_length]);
-            var plain: [cloak.PrivateKey.max_plaintext]u8 = undefined;
-            defer std.crypto.secureZero(u8, &plain);
-            if (private.decrypt(alg.oaep().?, encrypted_key, noise[0..noise_length], &plain)) |content_key| {
+            var plain_owner: aegis.Secret([cloak.PrivateKey.max_plaintext]u8) = .init(undefined);
+            defer plain_owner.deinit();
+            const plain = plain_owner.exposeMut();
+            if (private.decrypt(alg.oaep().?, encrypted_key, noise[0..noise_length], plain)) |content_key| {
                 if (content_key.len == cek.len) {
                     @memcpy(cek, content_key);
                     recovered = true;
@@ -528,8 +532,9 @@ fn recoverKey(io: std.Io, arena: std.mem.Allocator, key: *const DecryptionKey, a
                 diagnostics.check = .pbes2;
                 return error.InvalidHeader;
             }
-            var kek: [32]u8 = undefined;
-            defer std.crypto.secureZero(u8, &kek);
+            var kek_owner: aegis.Secret([32]u8) = .init(undefined);
+            defer kek_owner.deinit();
+            const kek = kek_owner.exposeMut();
             const kek_length = alg.wrapLength().?;
             try pbes2Key(arena, alg, key.material.password, salt_input, count, kek[0..kek_length]);
             recovered = unwrapInto(kek[0..kek_length], encrypted_key, cek);
@@ -563,18 +568,20 @@ fn agreeInto(arena: std.mem.Allocator, key: *const DecryptionKey, alg: KeyManage
     };
     const apu = if (joint.apu) |text| try decodeAlloc(arena, text) else "";
     const apv = if (joint.apv) |text| try decodeAlloc(arena, text) else "";
-    var z_buffer: [cloak.PrivateKey.max_shared]u8 = undefined;
-    defer std.crypto.secureZero(u8, &z_buffer);
+    var z_buffer_owner: aegis.Secret([cloak.PrivateKey.max_shared]u8) = .init(undefined);
+    defer z_buffer_owner.deinit();
+    const z_buffer = z_buffer_owner.exposeMut();
     // An epk of the right curve that the agreement refuses (X25519 of small
     // order) is the sender's fault, like a point off the curve.
-    const z = held.key.agree(peer, &z_buffer) catch return error.InvalidHeader;
+    const z = held.key.agree(peer, z_buffer) catch return error.InvalidHeader;
     if (alg == .ecdh_es) {
         if (encrypted_key.len != 0) return error.InvalidHeader;
         concatKdf(z, enc.name(), apu, apv, cek);
         return true;
     }
-    var kek: [32]u8 = undefined;
-    defer std.crypto.secureZero(u8, &kek);
+    var kek_owner: aegis.Secret([32]u8) = .init(undefined);
+    defer kek_owner.deinit();
+    const kek = kek_owner.exposeMut();
     const kek_length = alg.wrapLength().?;
     concatKdf(z, alg.name(), apu, apv, kek[0..kek_length]);
     return unwrapInto(kek[0..kek_length], encrypted_key, cek);
@@ -588,8 +595,9 @@ pub fn concatKdf(z: []const u8, algorithm_id: []const u8, apu: []const u8, apv: 
     var counter: u32 = 1;
     var at: usize = 0;
     while (at < out.len) : (counter += 1) {
-        var h = Sha256.init(.{});
-        defer std.crypto.secureZero(u8, std.mem.asBytes(&h));
+        var h_owner: aegis.Secret(Sha256) = .init(.init(.{}));
+        defer h_owner.deinit();
+        const h = h_owner.exposeMut();
         var word: [4]u8 = undefined;
         std.mem.writeInt(u32, &word, counter, .big);
         h.update(&word);
@@ -601,8 +609,9 @@ pub fn concatKdf(z: []const u8, algorithm_id: []const u8, apu: []const u8, apv: 
         }
         std.mem.writeInt(u32, &word, @intCast(out.len * 8), .big); // safe: at most 64 bytes
         h.update(&word);
-        var block = h.finalResult();
-        defer std.crypto.secureZero(u8, &block);
+        var block_owner: aegis.Secret([Sha256.digest_length]u8) = .init(h.finalResult());
+        defer block_owner.deinit();
+        const block = block_owner.exposeMut();
         const take = @min(block.len, out.len - at);
         @memcpy(out[at..][0..take], block[0..take]);
         at += take;
@@ -798,8 +807,9 @@ fn encryptDrawn(gpa: std.mem.Allocator, draw: Draw, out: *Writer, header: Encryp
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    var cek_buffer: [max_cek]u8 = undefined;
-    defer std.crypto.secureZero(u8, &cek_buffer);
+    var cek_buffer_owner: aegis.Secret([max_cek]u8) = .init(undefined);
+    defer cek_buffer_owner.deinit();
+    const cek_buffer = cek_buffer_owner.exposeMut();
     const cek = cek_buffer[0..enc.keyLength()];
     // `dir`'s is the recipient's key and ECDH-ES's the agreement's (`wrapKey`).
     switch (recipients[0].alg) {
@@ -969,8 +979,9 @@ fn wrapKey(gpa: std.mem.Allocator, arena: std.mem.Allocator, draw: Draw, r: Reci
             const p = r.key.password;
             var salt: [255]u8 = undefined;
             draw.fill(salt[0..p.salt_length]);
-            var kek: [32]u8 = undefined;
-            defer std.crypto.secureZero(u8, &kek);
+            var kek_owner: aegis.Secret([32]u8) = .init(undefined);
+            defer kek_owner.deinit();
+            const kek = kek_owner.exposeMut();
             const kek_length = r.alg.wrapLength().?;
             pbes2Key(arena, r.alg, p.password, salt[0..p.salt_length], p.count, kek[0..kek_length]) catch |err| return switch (err) {
                 error.ScratchTooSmall => error.OutOfMemory,
@@ -1024,13 +1035,15 @@ fn agreeTo(gpa: std.mem.Allocator, arena: std.mem.Allocator, draw: Draw, r: Reci
         error.NotPublic => unreachable,
     };
     out.epk = epk_json.written();
-    var z_buffer: [cloak.PrivateKey.max_shared]u8 = undefined;
-    defer std.crypto.secureZero(u8, &z_buffer);
+    var z_buffer_owner: aegis.Secret([cloak.PrivateKey.max_shared]u8) = .init(undefined);
+    defer z_buffer_owner.deinit();
+    const z_buffer = z_buffer_owner.exposeMut();
     // A recipient key the agreement refuses (an X25519 key of small order).
-    const z = ephemeral.agree(peer, &z_buffer) catch return error.InvalidKey;
+    const z = ephemeral.agree(peer, z_buffer) catch return error.InvalidKey;
     if (r.alg == .ecdh_es) return concatKdf(z, enc.name(), "", "", cek);
-    var kek: [32]u8 = undefined;
-    defer std.crypto.secureZero(u8, &kek);
+    var kek_owner: aegis.Secret([32]u8) = .init(undefined);
+    defer kek_owner.deinit();
+    const kek = kek_owner.exposeMut();
     const kek_length = r.alg.wrapLength().?;
     concatKdf(z, r.alg.name(), "", "", kek[0..kek_length]);
     out.encrypted_key = try arena.alloc(u8, cek.len + 8);

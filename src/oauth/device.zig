@@ -4,6 +4,7 @@
 //! the client's authentication; the answer is read into an `Authorization`
 //! or the server's error; the token request is `token.Grant.device_code`.
 const std = @import("std");
+const time = @import("clearance").time;
 const aegis = @import("aegis");
 const strand = @import("strand");
 const form = @import("uplink.wire").form;
@@ -70,7 +71,7 @@ pub const Authorization = struct {
 
     /// Whether the codes have expired at `now`: a new authorization is due.
     pub fn expired(a: *const Authorization, now: std.Io.Timestamp) bool {
-        return @divFloor(now.nanoseconds, std.time.ns_per_s) >= a.expires_at;
+        return time.unixSeconds(now) >= a.expires_at;
     }
 };
 
@@ -151,7 +152,7 @@ pub fn readAuthorization(gpa: std.mem.Allocator, status: u16, body: []const u8, 
         out.* = bytes[at..][0..v.len];
         at += v.len;
     }
-    const now: i64 = @intCast(@divFloor(options.now.nanoseconds, std.time.ns_per_s));
+    const now: i64 = time.unixSeconds(options.now);
     return .{ .authorization = .{
         .device_code = copied[0].?,
         .user_code = copied[1].?,

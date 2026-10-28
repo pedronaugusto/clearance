@@ -8,6 +8,7 @@
 //! signature, the binding then held to the key's thumbprint, never to trust
 //! what the proof says beyond who holds that key.
 const std = @import("std");
+const time = @import("time.zig");
 const aegis = @import("aegis");
 const strand = @import("strand");
 const base64url = @import("base64url.zig");
@@ -68,7 +69,7 @@ pub fn writeProof(gpa: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, key: 
         .jti = @as([]const u8, &jti),
         .htm = proof.htm,
         .htu = withoutQuery(proof.htu),
-        .iat = @as(i64, @intCast(@divFloor(now.nanoseconds, std.time.ns_per_s))),
+        .iat = time.unixSeconds(now),
         .ath = if (proof.access_token != null) @as([]const u8, &ath) else null,
         .nonce = proof.nonce,
     }, key.signer);
@@ -107,7 +108,7 @@ pub const Expected = struct {
     leeway: jwt.Duration = .literal("0s"),
     /// Where each proof's `jti` is kept for its life, so a replayed proof is
     /// refused (§11.1). Null leaves replay to the caller.
-    replay: ?jwt.Replay = null,
+    replay: ?*jwt.Replay = null,
     max_bytes: aegis.units.Bytes(usize) = .literal("8KiB"),
     min_rsa_bits: u16 = 2048,
     diagnostics: ?*jws.Diagnostics = null,
@@ -230,7 +231,7 @@ fn verifyChecked(io: std.Io, proof: []const u8, expected: Expected, now: std.Io.
 
     if (!std.mem.eql(u8, htm, expected.htm)) return error.WrongRequest;
     if (!sameUri(htu, expected.htu)) return error.WrongRequest;
-    const seconds: i64 = @intCast(@divFloor(now.nanoseconds, std.time.ns_per_s));
+    const seconds: i64 = time.unixSeconds(now);
     const max_age: i64 = expected.max_age.raw();
     if (iat > seconds +| leeway or seconds -| iat > max_age +| leeway) return error.TooOld;
     if (expected.access_token) |token| {
@@ -352,7 +353,7 @@ test "the access token's hash and the server's nonce are held to; a replayed pro
     var verified: Verified = undefined;
     var replay: jwt.MemoryReplay = try .init(gpa, 16);
     defer replay.deinit();
-    var expected: Expected = .{ .algorithms = &.{ .es256, .eddsa }, .htm = "GET", .htu = "HTTPS://RS.example:443/mcp", .access_token = "Kz~8mXK1EalYznwH-LC-1fBAo.4Ljp~zsPE_NeO.gxU", .nonce = "eyJ7S_zG.eyJH0-Z.HX4w-7v", .replay = replay.replay() };
+    var expected: Expected = .{ .algorithms = &.{ .es256, .eddsa }, .htm = "GET", .htu = "HTTPS://RS.example:443/mcp", .access_token = "Kz~8mXK1EalYznwH-LC-1fBAo.4Ljp~zsPE_NeO.gxU", .nonce = "eyJ7S_zG.eyJH0-Z.HX4w-7v", .replay = &replay.replay };
     try verifyProof(testing.io, text, expected, test_now, &scratch, &verified);
     try testing.expectError(error.Replayed, verifyProof(testing.io, text, expected, test_now, &scratch, &verified));
     expected.replay = null;

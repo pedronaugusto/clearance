@@ -5,6 +5,7 @@
 //! secrets (a client secret, a refresh token, a code verifier), so its body
 //! and its `Authorization` value live in wiped memory.
 const std = @import("std");
+const time = @import("clearance").time;
 const aegis = @import("aegis");
 const form = @import("uplink.wire").form;
 const clearance = @import("clearance");
@@ -196,7 +197,7 @@ fn basic(gpa: std.mem.Allocator, id: []const u8, secret: []const u8) std.mem.All
 }
 
 fn signAssertion(gpa: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, id: []const u8, p: PrivateKeyJwt, context: Context) Error!void {
-    const now: i64 = @intCast(@divFloor(context.now.nanoseconds, std.time.ns_per_s));
+    const now: i64 = time.unixSeconds(context.now);
     var jti: [pkce.length]u8 = undefined;
     pkce.random(io, &jti);
     const lifetime: i64 = p.lifetime.raw();

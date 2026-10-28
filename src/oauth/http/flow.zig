@@ -4,6 +4,7 @@
 //! dynamic registration, and the tokens a store keeps, kept fresh. Each takes the authorization server's metadata as discovered, so
 //! every endpoint was checked when it was read.
 const std = @import("std");
+const time = @import("clearance").time;
 const aegis = @import("aegis");
 const uplink = @import("uplink");
 const clearance = @import("clearance");
@@ -521,7 +522,7 @@ pub const DeviceFlow = struct {
     pub fn wait(flow: *DeviceFlow, gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, server: *const Server, client: Client, options: TokenOptions) WaitError!token.Response {
         while (true) {
             const now = std.Io.Clock.real.now(io);
-            const seconds: i64 = @intCast(@divFloor(now.nanoseconds, std.time.ns_per_s));
+            const seconds: i64 = time.unixSeconds(now);
             // A request after the codes expired would only be refused.
             if (seconds +| @as(i64, flow.authorization.interval) >= flow.authorization.expires_at) return error.Expired;
             try io.sleep(.fromSeconds(flow.authorization.interval), .awake);
@@ -672,7 +673,7 @@ pub const FreshError = RefreshError || store.LoadError || store.SaveError || err
 /// kept ones are spent: expired with no refresh token, or a refresh the
 /// server answered `invalid_grant` (they are forgotten then): a sign-in is
 /// due.
-pub fn fresh(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, tokens: store.TokenStore, key: []const u8, server: *const Server, client: Client, options: FreshOptions) FreshError!?TokenSet {
+pub fn fresh(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, tokens: *store.TokenStore, key: []const u8, server: *const Server, client: Client, options: FreshOptions) FreshError!?TokenSet {
     var set = (try tokens.load(io, gpa, key)) orelse return null;
     const now = std.Io.Clock.real.now(io);
     if (!set.expiresWithin(now, options.margin)) return set;

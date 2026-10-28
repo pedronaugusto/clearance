@@ -2,6 +2,7 @@
 //! them): the grants clearance asks for written as form requests, and the
 //! answer read into a `TokenSet` or the server's error.
 const std = @import("std");
+const time = @import("clearance").time;
 const aegis = @import("aegis");
 const strand = @import("strand");
 const form = @import("uplink.wire").form;
@@ -210,7 +211,7 @@ pub const TokenSet = struct {
     /// passed: time to refresh. A token with no expiry never does.
     pub fn expiresWithin(set: *const TokenSet, now: std.Io.Timestamp, margin: aegis.units.Duration(.second, u32)) bool {
         const at = set.expires_at orelse return false;
-        const seconds: i64 = @intCast(@divFloor(now.nanoseconds, std.time.ns_per_s));
+        const seconds: i64 = time.unixSeconds(now);
         return seconds +| @as(i64, margin.raw()) >= at;
     }
 
@@ -319,7 +320,7 @@ pub fn readResponse(gpa: std.mem.Allocator, status: u16, body: []const u8, optio
     }) catch return error.InvalidResponse;
     if (wire.access_token.len == 0) return error.InvalidResponse;
     const token_type = TokenType.parse(wire.token_type, options.dpop) orelse return error.UnsupportedTokenType;
-    const now: i64 = @intCast(@divFloor(options.now.nanoseconds, std.time.ns_per_s));
+    const now: i64 = time.unixSeconds(options.now);
     return .{ .tokens = try TokenSet.init(gpa, .{
         .access_token = wire.access_token,
         .token_type = token_type,

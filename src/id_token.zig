@@ -8,6 +8,7 @@
 //! access token) is refused: one kind of token never passes for another
 //! (RFC 8725 §3.11).
 const std = @import("std");
+const time = @import("time.zig");
 const aegis = @import("aegis");
 const strand = @import("strand");
 const jws = @import("jws.zig");
@@ -121,7 +122,7 @@ pub fn verify(comptime Extra: type, token: []const u8, keys: []const Key, expect
 
 fn check(comptime Extra: type, verified: jwt.Verified(Extra), expected: Expected, now: std.Io.Timestamp) VerifyError!Verified(Extra) {
     if (verified.header.typ) |typ| if (!jwt.mediaTypeIs(typ, "JWT")) return error.WrongType;
-    const seconds: i64 = @intCast(@divFloor(now.nanoseconds, std.time.ns_per_s));
+    const seconds: i64 = time.unixSeconds(now);
     const leeway: i64 = expected.leeway.raw();
     // `iat` in the future is a token not yet made.
     if (verified.registered.iat.? > seconds +| leeway) return error.TooOld;

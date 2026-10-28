@@ -4,6 +4,7 @@
 //! encrypted). Sent by value (`authorize.writeSignedUrl`) or pushed
 //! (`par.requestObject`), as FAPI 2.0 asks.
 const std = @import("std");
+const time = @import("clearance").time;
 const strand = @import("strand");
 const clearance = @import("clearance");
 const authorize = @import("authorize.zig");
@@ -76,7 +77,7 @@ fn sign(gpa: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, header: jws.Sig
 }
 
 fn writeClaims(w: *std.Io.Writer, io: std.Io, issuer: []const u8, request: authorize.Request, lifetime: jwt.Duration, now: std.Io.Timestamp) !void {
-    const seconds: i64 = @intCast(@divFloor(now.nanoseconds, std.time.ns_per_s));
+    const seconds: i64 = time.unixSeconds(now);
     var jti: [pkce.length]u8 = undefined;
     pkce.random(io, &jti);
     try w.writeAll("{\"iss\":");

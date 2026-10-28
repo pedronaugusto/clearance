@@ -321,8 +321,10 @@ const Bench = struct {
         defer replay.deinit();
         const keys = [_]clearance.Key{clearance.Key.hmac(&secret)};
         for (0..units) |_| {
-            replay.entries.clearRetainingCapacity();
-            const v = try clearance.logout.verifyToken(b.io, b.logout_token.written(), &keys, .{ .algorithms = &.{.hs256}, .issuer = "https://server.example.com", .client_id = "s6BhdRkqt3", .replay = replay.replay() }, logout_now, &b.scratch);
+            var held = replay.entries.acquireUncancelable(b.io);
+            held.value().clearRetainingCapacity();
+            held.deinit(b.io);
+            const v = try clearance.logout.verifyToken(b.io, b.logout_token.written(), &keys, .{ .algorithms = &.{.hs256}, .issuer = "https://server.example.com", .client_id = "s6BhdRkqt3", .replay = &replay.replay }, logout_now, &b.scratch);
             b.sink +%= v.jti.len;
         }
     }

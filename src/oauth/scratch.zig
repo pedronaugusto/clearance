@@ -44,6 +44,7 @@ pub const Scratch = struct {
 
     pub fn deinit(s: *Scratch) void {
         if (s.heap) |*h| return h.deinit(s.gpa);
+        // aegis: design: only what the parser reached is wiped, by its high-water mark; the whole buffer would cost more than the parse
         std.crypto.secureZero(u8, s.stack[0..s.high]);
     }
 
@@ -56,25 +57,25 @@ pub const Scratch = struct {
     }
 
     fn alloc(opaque_self: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-        const s: *Scratch = @ptrCast(@alignCast(opaque_self)); // safe: the vtable is only ever handed out with a *Scratch
+        const s: *Scratch = @ptrCast(@alignCast(opaque_self)); // aegis: boundary: std.mem.Allocator's vtable hands back the pointer `allocator` gave it, a *Scratch
         defer s.mark();
         return s.fixed.allocator().rawAlloc(len, alignment, ret);
     }
 
     fn resize(opaque_self: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
-        const s: *Scratch = @ptrCast(@alignCast(opaque_self)); // safe: the vtable is only ever handed out with a *Scratch
+        const s: *Scratch = @ptrCast(@alignCast(opaque_self)); // aegis: boundary: std.mem.Allocator's vtable hands back the pointer `allocator` gave it, a *Scratch
         defer s.mark();
         return s.fixed.allocator().rawResize(memory, alignment, new_len, ret);
     }
 
     fn remap(opaque_self: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
-        const s: *Scratch = @ptrCast(@alignCast(opaque_self)); // safe: the vtable is only ever handed out with a *Scratch
+        const s: *Scratch = @ptrCast(@alignCast(opaque_self)); // aegis: boundary: std.mem.Allocator's vtable hands back the pointer `allocator` gave it, a *Scratch
         defer s.mark();
         return s.fixed.allocator().rawRemap(memory, alignment, new_len, ret);
     }
 
     fn free(opaque_self: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
-        const s: *Scratch = @ptrCast(@alignCast(opaque_self)); // safe: the vtable is only ever handed out with a *Scratch
+        const s: *Scratch = @ptrCast(@alignCast(opaque_self)); // aegis: boundary: std.mem.Allocator's vtable hands back the pointer `allocator` gave it, a *Scratch
         s.fixed.allocator().rawFree(memory, alignment, ret);
     }
 };

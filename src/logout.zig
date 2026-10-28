@@ -4,6 +4,7 @@
 //! both, carries the back-channel event, and never a `nonce`, so that no ID
 //! token can pass for one; its `jti` is recorded so it is used once.
 const std = @import("std");
+const time = @import("time.zig");
 const aegis = @import("aegis");
 const strand = @import("strand");
 const jws = @import("jws.zig");
@@ -27,7 +28,7 @@ pub const Expected = struct {
     leeway: jwt.Duration = .literal("0s"),
     /// Where each token's `jti` is kept until its `exp`, so a token replayed
     /// is refused (§2.6, step 8). Null leaves replay to the caller.
-    replay: ?jwt.Replay = null,
+    replay: ?*jwt.Replay = null,
     max_bytes: aegis.units.Bytes(usize) = .literal("16KiB"),
     diagnostics: ?*jws.Diagnostics = null,
 };
@@ -107,7 +108,7 @@ pub fn verifyToken(io: std.Io, token: []const u8, keys: []const Key, expected: E
     const jti = verified.registered.jti.?;
     const exp = verified.registered.exp.?;
     if (expected.replay) |replay| {
-        const seconds: i64 = @intCast(@divFloor(now.nanoseconds, std.time.ns_per_s));
+        const seconds: i64 = time.unixSeconds(now);
         const leeway: i64 = expected.leeway.raw();
         const fresh = replay.record(io, jwt.replayId(expected.issuer, jti), exp +| leeway +| 1, seconds) catch {
             diagnostics.check = .replay;
@@ -144,7 +145,7 @@ test "§2.4's logout token is verified once: its user and session named" {
     var replay: jwt.MemoryReplay = try .init(gpa, 8);
     defer replay.deinit();
     var expected = test_expected;
-    expected.replay = replay.replay();
+    expected.replay = &replay.replay;
     var scratch: [2048]u8 = undefined;
     const v = try verifyToken(testing.io, token, &test_keys, expected, test_now, &scratch);
     try testing.expectEqualStrings("248289761001", v.sub.?);

@@ -2,6 +2,7 @@
 //! registered claims by type before value, the type header when the profile
 //! has one, the time claims against a clock the caller gives.
 const std = @import("std");
+const time = @import("time.zig");
 const aegis = @import("aegis");
 const strand = @import("strand");
 const jws = @import("jws.zig");
@@ -216,6 +217,7 @@ pub fn decryptNested(token: []const u8, decryption: Decryption, scratch: []u8, d
     // Read before the header's strings, which live past the content, are wiped.
     const content_type: ContentType = if (d.header.cty) |cty| (if (mediaTypeIs(cty, "JWT")) .jwt else .other) else .none;
     @memmove(scratch[0..d.plaintext.len], d.plaintext);
+    // aegis: design: the caller's scratch, borrowed: what decryption left past the content is wiped before it is handed back
     std.crypto.secureZero(u8, scratch[d.plaintext.len..]);
     return .{ .alg = d.header.alg, .enc = d.header.enc, .content_type = content_type, .content = scratch[0..d.plaintext.len], .rest = scratch[d.plaintext.len..] };
 }
@@ -353,7 +355,7 @@ pub fn numericDate(bytes: []const u8) error{InvalidClaims}!i64 {
 }
 
 fn checkRegistered(r: Registered, v: Inspection, now: std.Io.Timestamp) ClaimsError!void {
-    const seconds: i64 = @intCast(@divFloor(now.nanoseconds, std.time.ns_per_s));
+    const seconds: i64 = time.unixSeconds(now);
     const leeway: i64 = v.leeway.raw();
     const required = v.required;
     if ((required.iss and r.iss == null) or (required.sub and r.sub == null) or (required.aud and !r.aud.present) or
@@ -396,14 +398,11 @@ fn strip(media: []const u8) []const u8 {
 /// Where the identifiers of tokens meant to be used once (a DPoP proof's
 /// `jti`, a logout token's) are kept while those tokens could still be
 /// accepted, so a token replayed within its life is refused. The caller
-/// names an identifier by a hash (`replayId`), never the token's text.
+/// names an identifier by a hash (`replayId`), never the token's text. A
+/// set embeds one and finds itself from it by `@fieldParentPtr`
+/// (`MemoryReplay.replay`).
 pub const Replay = struct {
-    context: *anyopaque,
-    vtable: *const VTable,
-
-    pub const VTable = struct {
-        record: *const fn (context: *anyopaque, io: std.Io, id: [32]u8, until: i64, now: i64) RecordError!bool,
-    };
+    recordFn: *const fn (r: *Replay, io: std.Io, id: [32]u8, until: i64, now: i64) RecordError!bool,
 
     pub const RecordError = error{
         /// Every place is held by an identifier still in its life: refusing
@@ -414,8 +413,8 @@ pub const Replay = struct {
     /// Records `id` as seen until `until` (seconds since the epoch): true
     /// the first time, false when it is already held and `now` is before
     /// its end.
-    pub fn record(r: Replay, io: std.Io, id: [32]u8, until: i64, now: i64) RecordError!bool {
-        return r.vtable.record(r.context, io, id, until, now);
+    pub fn record(r: *Replay, io: std.Io, id: [32]u8, until: i64, now: i64) RecordError!bool {
+        return r.recordFn(r, io, id, until, now);
     }
 };
 
@@ -436,44 +435,44 @@ pub fn replayId(scope: []const u8, id: []const u8) [32]u8 {
 /// made: recording never allocates. Safe to share between tasks.
 pub const MemoryReplay = struct {
     gpa: std.mem.Allocator,
-    mutex: std.Io.Mutex = .init,
-    /// Guarded by `mutex`: each identifier and the second its life ends.
-    entries: std.array_hash_map.Auto([32]u8, i64) = .empty,
+    /// Each identifier and the second its life ends.
+    entries: aegis.BlockingGuarded(Entries),
     capacity: u32,
+    /// The set as verification takes it.
+    replay: Replay = .{ .recordFn = record },
+
+    const Entries = std.array_hash_map.Auto([32]u8, i64);
 
     pub fn init(gpa: std.mem.Allocator, capacity: u32) std.mem.Allocator.Error!MemoryReplay {
-        var m: MemoryReplay = .{ .gpa = gpa, .capacity = capacity };
-        try m.entries.ensureTotalCapacity(gpa, capacity);
-        return m;
+        var entries: Entries = .empty;
+        try entries.ensureTotalCapacity(gpa, capacity);
+        return .{ .gpa = gpa, .entries = .init(entries), .capacity = capacity };
     }
 
     pub fn deinit(m: *MemoryReplay) void {
-        m.entries.deinit(m.gpa);
+        m.entries.teardown().deinit(m.gpa);
         m.* = undefined;
     }
 
-    pub fn replay(m: *MemoryReplay) Replay {
-        return .{ .context = m, .vtable = &.{ .record = record } };
-    }
-
-    fn record(context: *anyopaque, io: std.Io, id: [32]u8, until: i64, now: i64) Replay.RecordError!bool {
-        const m: *MemoryReplay = @ptrCast(@alignCast(context)); // safe: the vtable is only ever handed out with a *MemoryReplay
-        m.mutex.lockUncancelable(io);
-        defer m.mutex.unlock(io);
-        if (m.entries.getPtr(id)) |end| {
+    fn record(r: *Replay, io: std.Io, id: [32]u8, until: i64, now: i64) Replay.RecordError!bool {
+        const m: *MemoryReplay = @fieldParentPtr("replay", r);
+        var held = m.entries.acquireUncancelable(io);
+        defer held.deinit(io);
+        const entries = held.value();
+        if (entries.getPtr(id)) |end| {
             if (now < end.*) return false;
             end.* = until;
             return true;
         }
-        if (m.entries.count() >= m.capacity) {
+        if (entries.count() >= m.capacity) {
             var i: usize = 0;
-            while (i < m.entries.count()) {
-                if (m.entries.values()[i] <= now) m.entries.swapRemoveAt(i) else i += 1;
+            while (i < entries.count()) {
+                if (entries.values()[i] <= now) entries.swapRemoveAt(i) else i += 1;
             }
-            if (m.entries.count() >= m.capacity) return error.Full;
+            if (entries.count() >= m.capacity) return error.Full;
         }
         // Within the capacity taken at `init`: no allocation.
-        m.entries.putAssumeCapacity(id, until);
+        entries.putAssumeCapacity(id, until);
         return true;
     }
 };
@@ -497,7 +496,7 @@ pub fn sign(gpa: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, header: jws
 test "a replay set refuses an identifier within its life, takes it again after, and refuses when full" {
     var m: MemoryReplay = try .init(std.testing.allocator, 2);
     defer m.deinit();
-    const r = m.replay();
+    const r = &m.replay;
     const io = std.testing.io;
     const a = replayId("key-a", "j1");
     try std.testing.expect(!std.mem.eql(u8, &a, &replayId("key-b", "j1")));

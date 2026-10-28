@@ -5,6 +5,7 @@
 //! with `TokenSet.write` and reads it back with `TokenSet.read`, and keeps
 //! what it wrote as the secret it is.
 const std = @import("std");
+const aegis = @import("aegis");
 const token = @import("token.zig");
 
 const TokenSet = token.TokenSet;
@@ -23,30 +24,27 @@ pub const SaveError = error{
     OutOfMemory,
 };
 
+/// A store embeds one and finds itself from it by `@fieldParentPtr`
+/// (`Memory.store`).
 pub const TokenStore = struct {
-    ptr: *anyopaque,
-    vtable: *const VTable,
+    loadFn: *const fn (s: *TokenStore, io: std.Io, gpa: std.mem.Allocator, key: []const u8) LoadError!?TokenSet,
+    saveFn: *const fn (s: *TokenStore, io: std.Io, key: []const u8, set: *const TokenSet) SaveError!void,
+    forgetFn: *const fn (s: *TokenStore, io: std.Io, key: []const u8) void,
 
-    pub const VTable = struct {
-        /// The set kept under `key`, a copy the caller owns, or null.
-        load: *const fn (ptr: *anyopaque, io: std.Io, gpa: std.mem.Allocator, key: []const u8) LoadError!?TokenSet,
-        /// Keeps a copy of `set` under `key`, replacing what was there.
-        save: *const fn (ptr: *anyopaque, io: std.Io, key: []const u8, set: *const TokenSet) SaveError!void,
-        /// Drops what is kept under `key`: a sign-out, or a refresh token the
-        /// server refused.
-        forget: *const fn (ptr: *anyopaque, io: std.Io, key: []const u8) void,
-    };
-
-    pub fn load(s: TokenStore, io: std.Io, gpa: std.mem.Allocator, key: []const u8) LoadError!?TokenSet {
-        return s.vtable.load(s.ptr, io, gpa, key);
+    /// The set kept under `key`, a copy the caller owns, or null.
+    pub fn load(s: *TokenStore, io: std.Io, gpa: std.mem.Allocator, key: []const u8) LoadError!?TokenSet {
+        return s.loadFn(s, io, gpa, key);
     }
 
-    pub fn save(s: TokenStore, io: std.Io, key: []const u8, set: *const TokenSet) SaveError!void {
-        return s.vtable.save(s.ptr, io, key, set);
+    /// Keeps a copy of `set` under `key`, replacing what was there.
+    pub fn save(s: *TokenStore, io: std.Io, key: []const u8, set: *const TokenSet) SaveError!void {
+        return s.saveFn(s, io, key, set);
     }
 
-    pub fn forget(s: TokenStore, io: std.Io, key: []const u8) void {
-        s.vtable.forget(s.ptr, io, key);
+    /// Drops what is kept under `key`: a sign-out, or a refresh token the
+    /// server refused.
+    pub fn forget(s: *TokenStore, io: std.Io, key: []const u8) void {
+        s.forgetFn(s, io, key);
     }
 };
 
@@ -54,61 +52,60 @@ pub const TokenStore = struct {
 /// between tasks; `gpa` must be too.
 pub const Memory = struct {
     gpa: std.mem.Allocator,
-    mutex: std.Io.Mutex = .init,
-    /// Guarded by `mutex`. Keys are owned.
-    sets: std.StringHashMapUnmanaged(TokenSet) = .empty,
+    /// Keys are owned.
+    sets: aegis.BlockingGuarded(Sets) = .init(.empty),
+    /// The memory as the flows take it.
+    store: TokenStore = .{ .loadFn = load, .saveFn = save, .forgetFn = forget },
+
+    const Sets = std.StringHashMapUnmanaged(TokenSet);
 
     pub fn init(gpa: std.mem.Allocator) Memory {
         return .{ .gpa = gpa };
     }
 
     pub fn deinit(m: *Memory) void {
-        var it = m.sets.iterator();
+        const sets = m.sets.teardown();
+        var it = sets.iterator();
         while (it.next()) |entry| {
             entry.value_ptr.deinit();
             m.gpa.free(entry.key_ptr.*);
         }
-        m.sets.deinit(m.gpa);
+        sets.deinit(m.gpa);
         m.* = undefined;
     }
 
-    pub fn store(m: *Memory) TokenStore {
-        return .{ .ptr = m, .vtable = &vtable };
-    }
-
-    const vtable: TokenStore.VTable = .{ .load = load, .save = save, .forget = forget };
-
-    fn load(ptr: *anyopaque, io: std.Io, gpa: std.mem.Allocator, key: []const u8) LoadError!?TokenSet {
-        const m: *Memory = @ptrCast(@alignCast(ptr)); // safe: the vtable is `store`'s, made over a `Memory`
-        try m.mutex.lock(io);
-        defer m.mutex.unlock(io);
-        const set = m.sets.getPtr(key) orelse return null;
+    fn load(s: *TokenStore, io: std.Io, gpa: std.mem.Allocator, key: []const u8) LoadError!?TokenSet {
+        const m: *Memory = @fieldParentPtr("store", s);
+        var held = try m.sets.acquire(io);
+        defer held.deinit(io);
+        const set = held.value().getPtr(key) orelse return null;
         return try TokenSet.init(gpa, set.borrow());
     }
 
-    fn save(ptr: *anyopaque, io: std.Io, key: []const u8, set: *const TokenSet) SaveError!void {
-        const m: *Memory = @ptrCast(@alignCast(ptr)); // safe: the vtable is `store`'s, made over a `Memory`
+    fn save(s: *TokenStore, io: std.Io, key: []const u8, set: *const TokenSet) SaveError!void {
+        const m: *Memory = @fieldParentPtr("store", s);
         var copy = try TokenSet.init(m.gpa, set.borrow());
         errdefer copy.deinit();
-        try m.mutex.lock(io);
-        defer m.mutex.unlock(io);
-        const entry = try m.sets.getOrPut(m.gpa, key);
+        var held = try m.sets.acquire(io);
+        defer held.deinit(io);
+        const sets = held.value();
+        const entry = try sets.getOrPut(m.gpa, key);
         if (entry.found_existing) {
             entry.value_ptr.deinit();
         } else {
             entry.key_ptr.* = m.gpa.dupe(u8, key) catch |err| {
-                m.sets.removeByPtr(entry.key_ptr);
+                sets.removeByPtr(entry.key_ptr);
                 return err;
             };
         }
         entry.value_ptr.* = copy;
     }
 
-    fn forget(ptr: *anyopaque, io: std.Io, key: []const u8) void {
-        const m: *Memory = @ptrCast(@alignCast(ptr)); // safe: the vtable is `store`'s, made over a `Memory`
-        m.mutex.lockUncancelable(io);
-        defer m.mutex.unlock(io);
-        const entry = m.sets.fetchRemove(key) orelse return;
+    fn forget(s: *TokenStore, io: std.Io, key: []const u8) void {
+        const m: *Memory = @fieldParentPtr("store", s);
+        var held = m.sets.acquireUncancelable(io);
+        defer held.deinit(io);
+        const entry = held.value().fetchRemove(key) orelse return;
         var set = entry.value;
         set.deinit();
         m.gpa.free(entry.key);
@@ -120,7 +117,7 @@ test "a memory store keeps copies by key, replaces them, and forgets them" {
     const io = std.testing.io;
     var memory: Memory = .init(gpa);
     defer memory.deinit();
-    const s = memory.store();
+    const s = &memory.store;
     try std.testing.expectEqual(@as(?TokenSet, null), try s.load(io, gpa, "https://rs.example/mcp"));
     {
         var set = try TokenSet.init(gpa, .{ .access_token = "a1", .refresh_token = "r1", .expires_at = 10 });

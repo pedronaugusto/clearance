@@ -22,6 +22,8 @@ const Provider = struct {
     gpa: std.mem.Allocator,
     mutex: Io.Mutex = .init,
     http: uplink.Server,
+    /// What the server calls for each request.
+    answer: Answer = .{ .provider = undefined },
     listener: Io.net.Server,
     serving: Io.Future(uplink.Server.ServeError!void),
     port: u16,
@@ -59,7 +61,8 @@ const Provider = struct {
         p.listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
         p.port = p.listener.socket.address.getPort();
         p.base = try std.mem.print(&p.base_buffer, "http://127.0.0.1:{d}", .{p.port});
-        p.http = .init(testing.allocator, .{}, .init(p, handle));
+        p.answer.provider = p;
+        p.http = .init(testing.allocator, .{}, &p.answer.handler);
         p.serving = io.concurrent(uplink.Server.serve, .{ &p.http, io, &p.listener }) catch return error.SkipZigTest;
     }
 
@@ -74,6 +77,17 @@ const Provider = struct {
     fn url(p: *const Provider, buffer: []u8, path: []const u8) []const u8 {
         return std.mem.print(buffer, "{s}{s}", .{ p.base, path }) catch unreachable; // unreachable: callers pass room for a URL
     }
+
+    /// The server's handler, which holds the provider it answers for.
+    const Answer = struct {
+        handler: uplink.server.Handler = .{ .handleFn = call },
+        provider: *Provider,
+
+        fn call(h: *const uplink.server.Handler, io: Io, request: *uplink.server.Request, response: *uplink.server.Response) anyerror!void {
+            const a: *const Answer = @alignCast(@fieldParentPtr("handler", h));
+            return a.provider.handle(io, request, response);
+        }
+    };
 
     fn handle(p: *Provider, io: Io, request: *uplink.server.Request, response: *uplink.server.Response) anyerror!void {
         var arena_state: std.heap.ArenaAllocator = .init(p.gpa);
@@ -681,7 +695,7 @@ test "revocation: the refresh token revoked, then the store forgets it; a refusa
 
     var memory: oauth.store.Memory = .init(gpa);
     defer memory.deinit();
-    const tokens = memory.store();
+    const tokens = &memory.store;
     var set = try oauth.TokenSet.init(gpa, .{ .access_token = "at1", .refresh_token = "rt1" });
     defer set.deinit();
     try tokens.save(io, "srv", &set);
@@ -743,7 +757,7 @@ test "DPoP: the server's nonce learned and sent again, a bound token, its proof 
         .source = .{ .keys = .{ .set = &keys, .algorithms = &.{.eddsa} } },
         .issuer = "https://as.example",
         .resource = "https://rs.example/mcp",
-        .dpop = .{ .algorithms = &.{ .es256, .eddsa }, .replay = replay.replay() },
+        .dpop = .{ .algorithms = &.{ .es256, .eddsa }, .replay = &replay.replay },
     };
     const target = "https://rs.example/mcp";
     var h = try session.headers(gpa, io, "GET", target, set);
@@ -858,7 +872,7 @@ test "a store's tokens are refreshed and saved when they expire, forgotten when 
     defer server.deinit();
     var memory: oauth.store.Memory = .init(gpa);
     defer memory.deinit();
-    const tokens = memory.store();
+    const tokens = &memory.store;
     const key = "https://rs.example/mcp";
     const client: oauth.Client = .{ .id = "app" };
 
@@ -1034,7 +1048,9 @@ test "introspection answers are kept until the bound, by the token's hash" {
     _ = try introspector.introspect(io, &http, arena.allocator(), "bad");
     // A third token evicts one of two: the cache stays bounded.
     _ = try introspector.introspect(io, &http, arena.allocator(), "other");
-    try testing.expectEqual(@as(u32, 2), introspector.entries.count());
+    var held = introspector.entries.acquireUncancelable(io);
+    defer held.deinit(io);
+    try testing.expectEqual(@as(u32, 2), held.value().count());
     p.mutex.lockUncancelable(io);
     defer p.mutex.unlock(io);
     try testing.expectEqual(@as(u32, 3), p.introspections);

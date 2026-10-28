@@ -586,9 +586,10 @@ fn check(key: *const Key, alg: Algorithm, signing_input: []const u8, signature: 
             const length = hashLength(alg.hash().?);
             // RFC 7518 §3.2: a key at least as long as the hash.
             if (secret.len < length) return error.WeakKey;
-            var mac: [64]u8 = undefined;
+            var mac_owner: aegis.Secret([64]u8) = .init(undefined);
+            defer mac_owner.deinit();
+            const mac = mac_owner.exposeMut();
             hmac(alg, secret, signing_input, mac[0..length]);
-            defer std.crypto.secureZero(u8, &mac);
             const same = aegis.secret.equalBytes(mac[0..length], signature) catch return error.InvalidSignature;
             if (!same.declassify("a refused MAC ends the verification")) return error.InvalidSignature;
         },
@@ -728,9 +729,10 @@ pub fn signCompact(gpa: std.mem.Allocator, io: std.Io, out: *Writer, header: Sig
     const protected_length = input.written().len;
     try input.writer.writeByte('.');
     if (header.b64) try base64url.encode(&input.writer, payload) else try input.writer.writeAll(payload);
-    var signature_buffer: [cloak.PrivateKey.max_signature]u8 = undefined;
-    defer std.crypto.secureZero(u8, &signature_buffer);
-    const signature = try signInput(io, signer, input.written(), &signature_buffer);
+    var signature_buffer_owner: aegis.Secret([cloak.PrivateKey.max_signature]u8) = .init(undefined);
+    defer signature_buffer_owner.deinit();
+    const signature_buffer = signature_buffer_owner.exposeMut();
+    const signature = try signInput(io, signer, input.written(), signature_buffer);
     if (options.detached) {
         try out.writeAll(input.written()[0..protected_length]);
         try out.writeByte('.');
@@ -785,9 +787,10 @@ pub fn signJson(gpa: std.mem.Allocator, io: std.Io, out: *Writer, form: Serializ
         if (s.unprotected) |u| _ = try checkUnprotectedForSigning(u, input.written());
         try input.writer.writeByte('.');
         if (b64) try base64url.encode(&input.writer, payload) else try input.writer.writeAll(payload);
-        var signature_buffer: [cloak.PrivateKey.max_signature]u8 = undefined;
-        defer std.crypto.secureZero(u8, &signature_buffer);
-        const signature = try signInput(io, s.signer, input.written(), &signature_buffer);
+        var signature_buffer_owner: aegis.Secret([cloak.PrivateKey.max_signature]u8) = .init(undefined);
+        defer signature_buffer_owner.deinit();
+        const signature_buffer = signature_buffer_owner.exposeMut();
+        const signature = try signInput(io, s.signer, input.written(), signature_buffer);
         if (i != 0) try out.writeByte(',');
         if (form == .general) try out.writeByte('{');
         try out.print("\"protected\":\"{s}\",", .{input.written()[0..protected_length]});
@@ -876,8 +879,9 @@ fn signInput(io: std.Io, signer: Signer, input: []const u8, buffer: *[cloak.Priv
         },
         .private => |p| blk: {
             if (alg.family() == .hmac) return error.InvalidKey;
-            var noise: [cloak.PrivateKey.max_noise]u8 = undefined;
-            defer std.crypto.secureZero(u8, &noise);
+            var noise_owner: aegis.Secret([cloak.PrivateKey.max_noise]u8) = .init(undefined);
+            defer noise_owner.deinit();
+            const noise = noise_owner.exposeMut();
             const noise_length = p.key.noiseLength();
             io.random(noise[0..noise_length]);
             break :blk p.key.sign(alg.signature(), input, noise[0..noise_length], buffer) catch |err| return switch (err) {
