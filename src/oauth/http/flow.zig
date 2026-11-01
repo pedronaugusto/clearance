@@ -4,6 +4,7 @@
 //! dynamic registration, and the tokens a store keeps, kept fresh. Each takes the authorization server's metadata as discovered, so
 //! every endpoint was checked when it was read.
 const std = @import("std");
+const time = @import("clearance").time;
 const aegis = @import("aegis");
 const uplink = @import("uplink");
 const clearance = @import("clearance");
@@ -21,6 +22,7 @@ const par = @import("../par.zig");
 const userinfo_message = @import("../userinfo.zig");
 const store = @import("../store.zig");
 const dpop = @import("../dpop.zig");
+const request_object = @import("../request_object.zig");
 const errors = @import("../errors.zig");
 const challenge = @import("../challenge.zig");
 const fetch = @import("fetch.zig");
@@ -79,7 +81,7 @@ const Sent = struct {
 };
 
 fn send(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, server: *const Server, client: ?Client, grant: token.Grant, options: TokenOptions) (fetch.Error || client_auth.Error || error{NoTokenEndpoint})!Sent {
-    const endpoint = server.token_endpoint orelse return error.NoTokenEndpoint;
+    const endpoint = server.endpoint(.token, if (client) |c| c.mutualTls() else false) orelse return error.NoTokenEndpoint;
     const Builder = struct {
         client: ?Client,
         grant: token.Grant,
@@ -227,26 +229,44 @@ pub const AuthorizationFlow = struct {
         /// code to its key. `finish` then needs the session in its options.
         dpop: ?*const dpop.Session = null,
         extra: []const form.Pair = &.{},
+        /// Send the parameters as a signed request object (RFC 9101), and
+        /// encrypted when its options say: by value from `begin`, pushed
+        /// from `push`. Required by a server that lists
+        /// `require_signed_request_object`.
+        request_object: ?request_object.Options = null,
     };
 
-    pub const BeginError = authorize.WriteError || error{
+    pub const BeginError = authorize.WriteError || request_object.Error || error{
         /// The metadata names no authorization endpoint.
         NoAuthorizationEndpoint,
         /// `require_pkce_listed`, and the metadata does not list S256.
         PkceNotSupported,
         /// The server requires pushed requests (RFC 9126 §5): `push`.
         PushRequired,
+        /// The server requires signed request objects (RFC 9101 §10.5) and
+        /// the request carries no `request_object`.
+        SignedRequestRequired,
     };
 
     /// Draws the state, the verifier and the nonce from `io`, and writes the
-    /// URL to open into `w`.
-    pub fn begin(io: std.Io, server: *const Server, request: Begin, w: *std.Io.Writer) BeginError!AuthorizationFlow {
+    /// URL to open into `w`: the parameters, or the request object signed
+    /// with `gpa` when the request carries one.
+    pub fn begin(gpa: std.mem.Allocator, io: std.Io, server: *const Server, request: Begin, w: *std.Io.Writer) BeginError!AuthorizationFlow {
         const endpoint = server.authorization_endpoint orelse return error.NoAuthorizationEndpoint;
         if (server.require_pushed_authorization_requests) return error.PushRequired;
+        if (server.require_signed_request_object and request.request_object == null) return error.SignedRequestRequired;
         var flow = try start(io, server, request);
         errdefer flow.deinit();
         var jkt: [43]u8 = undefined;
-        try authorize.writeUrl(w, endpoint, flow.parameters(request, &jkt));
+        const ask = flow.parameters(request, &jkt);
+        const signing = request.request_object orelse {
+            try authorize.writeUrl(w, endpoint, ask);
+            return flow;
+        };
+        var object: std.Io.Writer.Allocating = .init(gpa);
+        defer object.deinit();
+        try request_object.write(gpa, io, &object.writer, server.issuer, ask, signing, std.Io.Clock.real.now(io));
+        try authorize.writeSignedUrl(w, endpoint, ask, object.written());
         return flow;
     }
 
@@ -261,6 +281,7 @@ pub const AuthorizationFlow = struct {
         PkceNotSupported,
         /// The metadata names no pushed authorization request endpoint.
         NoPushEndpoint,
+        SignedRequestRequired,
     };
 
     /// Pushes the request to `server` (RFC 9126), authenticated as `client`
@@ -270,7 +291,8 @@ pub const AuthorizationFlow = struct {
     /// redirect as for `begin`.
     pub fn push(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, server: *const Server, client: Client, request: Begin, w: *std.Io.Writer, options: TokenOptions) PushError!Pushed {
         const endpoint = server.authorization_endpoint orelse return error.NoAuthorizationEndpoint;
-        const push_endpoint = server.pushed_authorization_request_endpoint orelse return error.NoPushEndpoint;
+        const push_endpoint = server.endpoint(.pushed_authorization_request, client.mutualTls()) orelse return error.NoPushEndpoint;
+        if (server.require_signed_request_object and request.request_object == null) return error.SignedRequestRequired;
         var flow = start(io, server, request) catch |err| return switch (err) {
             error.PkceNotSupported => error.PkceNotSupported,
         };
@@ -281,11 +303,23 @@ pub const AuthorizationFlow = struct {
             client: Client,
             ask: authorize.Request,
             issuer: []const u8,
+            signing: ?request_object.Options,
+            /// A request object is signed anew for each send: a retry with
+            /// the server's DPoP nonce carries a fresh `jti`.
             fn build(b: @This(), g: std.mem.Allocator, i: std.Io, now: std.Io.Timestamp) client_auth.Error!client_auth.FormRequest {
-                return par.request(g, i, b.client, b.ask, .{ .issuer = b.issuer, .now = now });
+                const signing = b.signing orelse return par.request(g, i, b.client, b.ask, .{ .issuer = b.issuer, .now = now });
+                var object: std.Io.Writer.Allocating = .init(g);
+                defer object.deinit();
+                request_object.write(g, i, &object.writer, b.issuer, b.ask, signing, now) catch |err| return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.InvalidKey => error.InvalidKey,
+                    error.SigningFailed => error.SigningFailed,
+                    error.EntropyUnavailable => error.EntropyUnavailable,
+                };
+                return par.requestObject(g, i, b.client, object.written(), .{ .issuer = b.issuer, .now = now });
             }
         };
-        var sent = try postProved(gpa, io, http, push_endpoint, options, Builder{ .client = client, .ask = ask, .issuer = server.issuer });
+        var sent = try postProved(gpa, io, http, push_endpoint, options, Builder{ .client = client, .ask = ask, .issuer = server.issuer, .signing = request.request_object });
         defer sent.answer.deinit();
         switch (try par.readResponse(sent.answer.status, sent.answer.body.expose(), .{ .now = sent.at, .max_bytes = options.max_bytes })) {
             .refused => |e| {
@@ -341,7 +375,9 @@ pub const AuthorizationFlow = struct {
     /// Verifies the ID token `set` brought (`error.NoIdToken` when none):
     /// for the client `client_id` from `server`, with this flow's `nonce` and
     /// the set's access token for `at_hash`, signed by one of `keys` with one
-    /// of `algorithms`. Strings borrow from `scratch` and the keys.
+    /// of `algorithms`, decrypted first with `decryption` when the client
+    /// registered encrypted ID tokens. Strings borrow from `scratch` and the
+    /// keys.
     pub fn verifyIdToken(
         flow: *const AuthorizationFlow,
         comptime Extra: type,
@@ -350,6 +386,7 @@ pub const AuthorizationFlow = struct {
         client_id: []const u8,
         keys: []const clearance.Key,
         algorithms: []const clearance.Algorithm,
+        decryption: ?clearance.jwt.Decryption,
         now: std.Io.Timestamp,
         scratch: []u8,
     ) (clearance.id_token.VerifyError || error{NoIdToken})!clearance.id_token.Verified(Extra) {
@@ -360,6 +397,7 @@ pub const AuthorizationFlow = struct {
             .client_id = client_id,
             .nonce = if (flow.nonce) |*n| n else null,
             .access_token = set.access_token,
+            .decryption = decryption,
         }, now, scratch);
     }
 
@@ -378,7 +416,7 @@ pub const AuthorizationFlow = struct {
         const query = if (std.mem.findScalar(u8, redirect, '?') != null) authorize.queryOf(redirect) else redirect;
         // The code is a secret until spent: decoded into wiped memory.
         var scratch = aegis.SecretBytes.init(gpa, query.len) catch return error.OutOfMemory;
-        defer scratch.deinit();
+        defer scratch.deinit(gpa);
         // unreachable: the capacity was just allocated at this length
         scratch.resizeWithinCapacity(query.len) catch unreachable;
         const callback = try authorize.readCallback(query, .{
@@ -425,7 +463,7 @@ pub const DeviceFlow = struct {
     /// sends its id; a confidential one authenticates as at the token
     /// endpoint).
     pub fn begin(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, server: *const Server, client: Client, request: device.Request, options: TokenOptions) BeginError!Begun {
-        const endpoint = server.device_authorization_endpoint orelse return error.NoDeviceEndpoint;
+        const endpoint = server.endpoint(.device_authorization, client.mutualTls()) orelse return error.NoDeviceEndpoint;
         const now = std.Io.Clock.real.now(io);
         var form_request = try device.request(gpa, io, client, request, .{ .issuer = server.issuer, .now = now });
         defer form_request.deinit();
@@ -484,7 +522,7 @@ pub const DeviceFlow = struct {
     pub fn wait(flow: *DeviceFlow, gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, server: *const Server, client: Client, options: TokenOptions) WaitError!token.Response {
         while (true) {
             const now = std.Io.Clock.real.now(io);
-            const seconds: i64 = @intCast(@divFloor(now.nanoseconds, std.time.ns_per_s));
+            const seconds: i64 = time.unixSeconds(now);
             // A request after the codes expired would only be refused.
             if (seconds +| @as(i64, flow.authorization.interval) >= flow.authorization.expires_at) return error.Expired;
             try io.sleep(.fromSeconds(flow.authorization.interval), .awake);
@@ -512,7 +550,7 @@ pub const RevokeError = fetch.Error || client_auth.Error || revocation.ReadError
 /// access tokens with it, §2.1), then forget the store's entry. Sent once:
 /// a refusal, a 503 among them, is the server's answer.
 pub fn revoke(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, server: *const Server, client: Client, token_text: []const u8, hint: ?revocation.Hint, options: RevokeOptions) RevokeError!revocation.Response {
-    const endpoint = server.revocation_endpoint orelse return error.NoRevocationEndpoint;
+    const endpoint = server.endpoint(.revocation, client.mutualTls()) orelse return error.NoRevocationEndpoint;
     var request = try revocation.request(gpa, io, client, token_text, hint, .{ .issuer = server.issuer, .now = std.Io.Clock.real.now(io) });
     defer request.deinit();
     var answer = try fetch.postForm(gpa, io, http, endpoint, &request, null, options.max_bytes, options.fetch);
@@ -525,8 +563,15 @@ pub const UserInfoOptions = struct {
     /// algorithms that verify them (the issuer and client come from the
     /// call).
     signed: ?struct { keys: []const clearance.Key, algorithms: []const clearance.Algorithm, client_id: []const u8 } = null,
+    /// Set when the client registered encrypted answers: the keys and
+    /// allowlists that decrypt them.
+    encrypted: ?clearance.jwt.Decryption = null,
     /// The DPoP session a DPoP-bound set's token is presented with.
     dpop: ?*dpop.Session = null,
+    /// The HTTP client presents the TLS certificate a certificate-bound
+    /// token is bound to (RFC 8705 §3): the server's mutual TLS alias is
+    /// used (§5).
+    mutual_tls: bool = false,
     max_bytes: fetch.Bytes = .literal("64KiB"),
     fetch: fetch.Options = .{},
 };
@@ -545,7 +590,7 @@ pub const UserInfoError = fetch.Error || userinfo_message.ReadError || dpop.Proo
 /// token is presented with a proof, sent once more with the resource's
 /// nonce when it asks for one. Strings live in `arena`.
 pub fn userinfo(comptime Claims: type, arena: std.mem.Allocator, io: std.Io, http: *uplink.Client, server: *const Server, set: *const TokenSet, subject: []const u8, options: UserInfoOptions) UserInfoError!userinfo_message.Response(Claims) {
-    const endpoint = server.userinfo_endpoint orelse return error.NoUserInfoEndpoint;
+    const endpoint = server.endpoint(.userinfo, options.mutual_tls) orelse return error.NoUserInfoEndpoint;
     if (set.token_type == .dpop and options.dpop == null) return error.DpopRequired;
     var attempt: u8 = 0;
     while (true) : (attempt += 1) {
@@ -553,7 +598,7 @@ pub fn userinfo(comptime Claims: type, arena: std.mem.Allocator, io: std.Io, htt
             .bearer => blk: {
                 const prefix = "Bearer ";
                 var authorization = aegis.SecretBytes.init(arena, prefix.len + set.access_token.len) catch return error.OutOfMemory;
-                defer authorization.deinit();
+                defer authorization.deinit(arena);
                 // unreachable: the capacity was just allocated at this length
                 authorization.resizeWithinCapacity(prefix.len + set.access_token.len) catch unreachable;
                 @memcpy(authorization.exposeMut()[0..prefix.len], prefix);
@@ -578,13 +623,16 @@ pub fn userinfo(comptime Claims: type, arena: std.mem.Allocator, io: std.Io, htt
             }
         };
         const signed: ?userinfo_message.Expected.Signed = if (options.signed) |s| .{ .keys = s.keys, .algorithms = s.algorithms, .issuer = server.issuer, .client_id = s.client_id, .now = std.Io.Clock.real.now(io) } else null;
-        return userinfo_message.readResponse(Claims, arena, answer.status, answer.content_type.slice(), answer.challenges, answer.body, .{ .subject = subject, .signed = signed }, .{ .max_bytes = options.max_bytes });
+        return userinfo_message.readResponse(Claims, arena, answer.status, answer.content_type.slice(), answer.challenges, answer.body, .{ .subject = subject, .signed = signed, .encrypted = options.encrypted }, .{ .max_bytes = options.max_bytes });
     }
 }
 
 pub const RegisterOptions = struct {
     /// RFC 7591 §3's initial access token, when the server asks for one.
     initial_access_token: ?[]const u8 = null,
+    /// The HTTP client presents a TLS certificate: the server's mutual TLS
+    /// alias is used (RFC 8705 §5).
+    mutual_tls: bool = false,
     max_bytes: fetch.Bytes = .literal("64KiB"),
     fetch: fetch.Options = .{},
 };
@@ -596,7 +644,7 @@ pub const RegisterError = fetch.Error || registration.WriteError || registration
 
 /// Registers a client with `server` (RFC 7591).
 pub fn register(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, server: *const Server, client_metadata: registration.ClientMetadata, options: RegisterOptions) RegisterError!registration.Response {
-    const endpoint = server.registration_endpoint orelse return error.NoRegistrationEndpoint;
+    const endpoint = server.endpoint(.registration, options.mutual_tls) orelse return error.NoRegistrationEndpoint;
     var body: std.Io.Writer.Allocating = .init(gpa);
     defer body.deinit();
     registration.writeRequest(&body.writer, client_metadata) catch |err| return switch (err) {
@@ -625,7 +673,7 @@ pub const FreshError = RefreshError || store.LoadError || store.SaveError || err
 /// kept ones are spent: expired with no refresh token, or a refresh the
 /// server answered `invalid_grant` (they are forgotten then): a sign-in is
 /// due.
-pub fn fresh(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, tokens: store.TokenStore, key: []const u8, server: *const Server, client: Client, options: FreshOptions) FreshError!?TokenSet {
+pub fn fresh(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, tokens: *store.TokenStore, key: []const u8, server: *const Server, client: Client, options: FreshOptions) FreshError!?TokenSet {
     var set = (try tokens.load(io, gpa, key)) orelse return null;
     const now = std.Io.Clock.real.now(io);
     if (!set.expiresWithin(now, options.margin)) return set;

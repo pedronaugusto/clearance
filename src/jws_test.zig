@@ -30,10 +30,10 @@ fn cookbookCompact(comptime file: []const u8, out: []u8) ![]const u8 {
 
 const cookbook_payload = "It\xe2\x80\x99s a dangerous business, Frodo, going out your door. You step onto the road, and if you don't keep your feet, there\xe2\x80\x99s no knowing where you might be swept off to.";
 
-test "RFC 7520 4.1, 4.2 and 4.4: the cookbook's RS256, PS384 and HS256 signatures verify" {
+test "RFC 7520 4.1 to 4.4: the cookbook's RS256, PS384, ES512 and HS256 signatures verify" {
     var buffer: [4096]u8 = undefined;
     var scratch: [8192]u8 = undefined;
-    inline for (.{ .{ "4_1.rsa_v15_signature.json", Algorithm.rs256 }, .{ "4_2.rsa-pss_signature.json", Algorithm.ps384 }, .{ "4_4.hmac-sha2_integrity_protection.json", Algorithm.hs256 } }) |row| {
+    inline for (.{ .{ "4_1.rsa_v15_signature.json", Algorithm.rs256 }, .{ "4_2.rsa-pss_signature.json", Algorithm.ps384 }, .{ "4_3.ecdsa_signature.json", Algorithm.es512 }, .{ "4_4.hmac-sha2_integrity_protection.json", Algorithm.hs256 } }) |row| {
         var set = try cookbookKey(row[0]);
         defer set.deinit();
         try std.testing.expectEqual(@as(usize, 1), set.keys.len);
@@ -47,13 +47,17 @@ test "RFC 7520 4.1, 4.2 and 4.4: the cookbook's RS256, PS384 and HS256 signature
     }
 }
 
-test "RFC 7520 4.3: ES512 is not an algorithm clearance has, so its signature is refused" {
+test "RFC 7520 4.3: ES512 is P-521's, refused under a P-256 or P-384 key and a signature of another length" {
     var buffer: [4096]u8 = undefined;
     var scratch: [8192]u8 = undefined;
     const token = try cookbookCompact("4_3.ecdsa_signature.json", &buffer);
-    var diagnostics: jws.Diagnostics = .{};
-    try std.testing.expectError(error.AlgorithmNotAllowed, jws.verify(token, &.{}, .{ .algorithms = all, .diagnostics = &diagnostics }, &scratch));
-    try std.testing.expectEqual(jws.Check.algorithm_unknown, diagnostics.check);
+    var set = try cookbookKey("4_3.ecdsa_signature.json");
+    defer set.deinit();
+    try std.testing.expectEqual(Key.Curve.p521, set.keys[0].material.ec.curve);
+    try std.testing.expect(set.keys[0].fits(.es512));
+    try std.testing.expect(!set.keys[0].fits(.es384));
+    // The signature three bytes short: r || s is 132 bytes for P-521.
+    try std.testing.expectError(error.InvalidSignature, jws.verify(token[0 .. token.len - 4], set.keys, .{ .algorithms = &.{.es512} }, &scratch));
 }
 
 const ed_public = "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}";
@@ -122,8 +126,24 @@ test "RFC 7520 4.2: the cookbook's private RSA JWK signs PS384, and the token ve
     try std.testing.expectEqualStrings(cookbook_payload, verified.payload);
 }
 
-test "RFC 7520 4.3: a P-521 private key is not one clearance signs with" {
-    try std.testing.expectError(error.UnsupportedKey, cookbookPrivate("4_3.ecdsa_signature.json"));
+test "RFC 7520 4.3: the cookbook's private P-521 JWK signs ES512, and the token verifies with its public half" {
+    var private = try cookbookPrivate("4_3.ecdsa_signature.json");
+    defer private.deinit();
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    // ES512 from the key's curve, the algorithm its JWK names none of.
+    try jws.sign(gpa, std.testing.io, &out.writer, .{}, cookbook_payload, try jws.Signer.fromJwk(&private, null));
+    var scratch: [8192]u8 = undefined;
+    const verified = try jws.verify(out.written(), &.{private.public}, .{ .algorithms = &.{.es512} }, &scratch);
+    try std.testing.expectEqual(Algorithm.es512, verified.header.alg);
+    try std.testing.expectEqualStrings(cookbook_payload, verified.payload);
+    // The public half written back reads as the same key.
+    var written: std.Io.Writer.Allocating = .init(gpa);
+    defer written.deinit();
+    try jwk.writePublic(&written.writer, private.public);
+    var again = try jwk.KeySet.parse(gpa, written.written(), .{});
+    defer again.deinit();
+    try std.testing.expectEqualSlices(u8, private.public.material.ec.point, again.keys[0].material.ec.point);
 }
 
 /// RFC 8037 A.1's private key.
@@ -273,7 +293,7 @@ test "verifying allocates nothing and needs only the scratch it asks for" {
 
 test "inspect reads a token it cannot verify, and refuses one that is not signed or not well formed" {
     var scratch: [4096]u8 = undefined;
-    // RFC 7520 4.3's ES512 token: an algorithm clearance does not verify, read all the same.
+    // RFC 7520 4.3's ES512 token, read without its key.
     var buffer: [4096]u8 = undefined;
     const es512 = try cookbookCompact("4_3.ecdsa_signature.json", &buffer);
     const read = try jws.inspect(es512, .literal("16KiB"), &scratch);
@@ -317,4 +337,82 @@ test "an external signer signs what clearance built, and its token verifies" {
     try std.testing.expectEqualStrings(ed_token, out.written());
     try std.testing.expectEqual(@as(u32, 1), kms.calls);
     try std.testing.expectError(error.SigningFailed, jws.sign(gpa, std.testing.io, &out.writer, .{}, "x", .{ .external = .{ .alg = .es256, .context = &kms, .sign = Kms.sign } }));
+}
+
+/// RFC 9964 A.1's example of `name`: the private JWK, the token, and the
+/// bytes signed and the signature, as hex.
+const MlDsaExample = struct { jwk: std.json.Value, jws: []const u8, raw_to_be_signed: []const u8, raw_signature: []const u8 };
+
+fn mldsaExample(comptime name: []const u8) !std.json.Parsed(MlDsaExample) {
+    return std.json.parseFromSlice(MlDsaExample, gpa, @embedFile("testing/vectors/rfc9964/a_1." ++ name ++ ".json"), .{ .ignore_unknown_fields = true });
+}
+
+fn jsonText(value: std.json.Value) ![]u8 {
+    return std.json.Stringify.valueAlloc(gpa, value, .{});
+}
+
+test "RFC 9964 A.1: each ML-DSA example verifies with its public JWK, named by its thumbprint, and its private JWK signs tokens that verify" {
+    var scratch: [16384]u8 = undefined;
+    inline for (.{ .{ "ml_dsa_44", Algorithm.ml_dsa_44 }, .{ "ml_dsa_65", Algorithm.ml_dsa_65 }, .{ "ml_dsa_87", Algorithm.ml_dsa_87 } }) |row| {
+        const example = try mldsaExample(row[0]);
+        defer example.deinit();
+        const private_text = try jsonText(example.value.jwk);
+        defer gpa.free(private_text);
+        var public_value = try example.value.jwk.object.clone(gpa);
+        defer public_value.deinit(gpa);
+        _ = public_value.swapRemove("priv");
+        const public_text = try jsonText(.{ .object = public_value });
+        defer gpa.free(public_text);
+
+        var set = try jwk.KeySet.parse(gpa, public_text, .{});
+        defer set.deinit();
+        try std.testing.expectEqual(@as(usize, 1), set.keys.len);
+        try std.testing.expectEqual(row[1].mldsa().?, set.keys[0].material.akp.level);
+        // RFC 9964 §6: the examples' kid is the key's thumbprint over alg, kty and pub.
+        var thumbprint: std.Io.Writer.Allocating = .init(gpa);
+        defer thumbprint.deinit();
+        try @import("base64url.zig").encode(&thumbprint.writer, &jwk.thumbprint(set.keys[0]));
+        try std.testing.expectEqualStrings(set.keys[0].kid.?, thumbprint.written());
+
+        const verified = try jws.verify(example.value.jws, set.keys, .{ .algorithms = &.{row[1]} }, &scratch);
+        try std.testing.expectEqual(row[1], verified.header.alg);
+        try std.testing.expectEqualStrings("It\xe2\x80\x99s a dangerous business, Frodo, going out your door.", verified.payload);
+        // Another level is another algorithm: not allowed, and not this key's.
+        const other: Algorithm = if (row[1] == .ml_dsa_44) .ml_dsa_65 else .ml_dsa_44;
+        try std.testing.expectError(error.AlgorithmNotAllowed, jws.verify(example.value.jws, set.keys, .{ .algorithms = &.{other} }, &scratch));
+        try std.testing.expect(!set.keys[0].fits(other));
+        // One bit of the signature's last character changed.
+        const tampered = try gpa.dupe(u8, example.value.jws);
+        defer gpa.free(tampered);
+        tampered[tampered.len - 1] = if (tampered[tampered.len - 1] == 'A') 'B' else 'A';
+        try std.testing.expectError(error.InvalidSignature, jws.verify(tampered, set.keys, .{ .algorithms = &.{row[1]} }, &scratch));
+
+        // The private JWK: its seed, its algorithm named by its own alg.
+        var private = try jwk.PrivateKey.parse(gpa, private_text, .{});
+        defer private.deinit();
+        const signer = try jws.Signer.fromJwk(&private, null);
+        try std.testing.expectEqual(row[1], signer.algorithm());
+        try std.testing.expectError(error.InvalidKey, jws.Signer.fromJwk(&private, other));
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        try jws.sign(gpa, std.testing.io, &out.writer, .{ .kid = private.public.kid }, "payload", signer);
+        const mine = try jws.verify(out.written(), set.keys, .{ .algorithms = &.{row[1]} }, &scratch);
+        try std.testing.expectEqualStrings("payload", mine.payload);
+    }
+}
+
+test "RFC 9964 A.1: ML-DSA-44's example signature is the deterministic one over its signing input" {
+    const example = try mldsaExample("ml_dsa_44");
+    defer example.deinit();
+    const text = try jsonText(example.value.jwk);
+    defer gpa.free(text);
+    var private = try jwk.PrivateKey.parse(gpa, text, .{});
+    defer private.deinit();
+    var input: [4096]u8 = undefined;
+    const signing_input = try std.fmt.hexToBytes(&input, example.value.raw_to_be_signed);
+    var expected: [cloak.PrivateKey.max_signature]u8 = undefined;
+    const signature = try std.fmt.hexToBytes(&expected, example.value.raw_signature);
+    const noise: [32]u8 = @splat(0);
+    var out: [cloak.PrivateKey.max_signature]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, signature, try private.key.sign(.{ .mldsa = .mldsa44 }, signing_input, &noise, &out));
 }

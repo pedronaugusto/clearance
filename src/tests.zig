@@ -5,6 +5,7 @@ test {
     _ = @import("Key.zig");
     _ = @import("jwk.zig");
     _ = @import("jws.zig");
+    _ = @import("jwe.zig");
     _ = @import("jwt.zig");
     _ = @import("id_token.zig");
     _ = @import("access_token.zig");

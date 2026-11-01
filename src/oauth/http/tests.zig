@@ -22,6 +22,8 @@ const Provider = struct {
     gpa: std.mem.Allocator,
     mutex: Io.Mutex = .init,
     http: uplink.Server,
+    /// What the server calls for each request.
+    answer: Answer = .{ .provider = undefined },
     listener: Io.net.Server,
     serving: Io.Future(uplink.Server.ServeError!void),
     port: u16,
@@ -59,7 +61,8 @@ const Provider = struct {
         p.listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
         p.port = p.listener.socket.address.getPort();
         p.base = try std.mem.print(&p.base_buffer, "http://127.0.0.1:{d}", .{p.port});
-        p.http = .init(testing.allocator, .{}, .init(p, handle));
+        p.answer.provider = p;
+        p.http = .init(testing.allocator, .{}, &p.answer.handler);
         p.serving = io.concurrent(uplink.Server.serve, .{ &p.http, io, &p.listener }) catch return error.SkipZigTest;
     }
 
@@ -74,6 +77,17 @@ const Provider = struct {
     fn url(p: *const Provider, buffer: []u8, path: []const u8) []const u8 {
         return std.mem.print(buffer, "{s}{s}", .{ p.base, path }) catch unreachable; // unreachable: callers pass room for a URL
     }
+
+    /// The server's handler, which holds the provider it answers for.
+    const Answer = struct {
+        handler: uplink.server.Handler = .{ .handleFn = call },
+        provider: *Provider,
+
+        fn call(h: *const uplink.server.Handler, io: Io, request: *uplink.server.Request, response: *uplink.server.Response) anyerror!void {
+            const a: *const Answer = @alignCast(@fieldParentPtr("handler", h));
+            return a.provider.handle(io, request, response);
+        }
+    };
 
     fn handle(p: *Provider, io: Io, request: *uplink.server.Request, response: *uplink.server.Response) anyerror!void {
         var arena_state: std.heap.ArenaAllocator = .init(p.gpa);
@@ -496,7 +510,7 @@ test "the code flow: PKCE, state, iss and the resource carried to the token endp
 
     var url_out: std.Io.Writer.Allocating = .init(gpa);
     defer url_out.deinit();
-    var flow = try oauth.AuthorizationFlow.begin(io, &server.value, .{
+    var flow = try oauth.AuthorizationFlow.begin(gpa, io, &server.value, .{
         .client_id = "app",
         .redirect_uri = "http://127.0.0.1:9/cb",
         .scope = "mcp",
@@ -577,7 +591,7 @@ test "a pushed authorization request: the parameters pushed, the browser sent wi
     try testing.expectEqual(oauth.errors.Code.invalid_request, refused.refused.code);
     var strict = server.value;
     strict.require_pushed_authorization_requests = true;
-    try testing.expectError(error.PushRequired, oauth.AuthorizationFlow.begin(io, &strict, begin, &url_out.writer));
+    try testing.expectError(error.PushRequired, oauth.AuthorizationFlow.begin(gpa, io, &strict, begin, &url_out.writer));
 }
 
 test "client credentials with Basic, refused with the server's error when the secret is wrong" {
@@ -681,7 +695,7 @@ test "revocation: the refresh token revoked, then the store forgets it; a refusa
 
     var memory: oauth.store.Memory = .init(gpa);
     defer memory.deinit();
-    const tokens = memory.store();
+    const tokens = &memory.store;
     var set = try oauth.TokenSet.init(gpa, .{ .access_token = "at1", .refresh_token = "rt1" });
     defer set.deinit();
     try tokens.save(io, "srv", &set);
@@ -743,7 +757,7 @@ test "DPoP: the server's nonce learned and sent again, a bound token, its proof 
         .source = .{ .keys = .{ .set = &keys, .algorithms = &.{.eddsa} } },
         .issuer = "https://as.example",
         .resource = "https://rs.example/mcp",
-        .dpop = .{ .algorithms = &.{ .es256, .eddsa }, .replay = replay.replay() },
+        .dpop = .{ .algorithms = &.{ .es256, .eddsa }, .replay = &replay.replay },
     };
     const target = "https://rs.example/mcp";
     var h = try session.headers(gpa, io, "GET", target, set);
@@ -858,7 +872,7 @@ test "a store's tokens are refreshed and saved when they expire, forgotten when 
     defer server.deinit();
     var memory: oauth.store.Memory = .init(gpa);
     defer memory.deinit();
-    const tokens = memory.store();
+    const tokens = &memory.store;
     const key = "https://rs.example/mcp";
     const client: oauth.Client = .{ .id = "app" };
 
@@ -1034,7 +1048,9 @@ test "introspection answers are kept until the bound, by the token's hash" {
     _ = try introspector.introspect(io, &http, arena.allocator(), "bad");
     // A third token evicts one of two: the cache stays bounded.
     _ = try introspector.introspect(io, &http, arena.allocator(), "other");
-    try testing.expectEqual(@as(u32, 2), introspector.entries.count());
+    var held = introspector.entries.acquireUncancelable(io);
+    defer held.deinit(io);
+    try testing.expectEqual(@as(u32, 2), held.value().count());
     p.mutex.lockUncancelable(io);
     defer p.mutex.unlock(io);
     try testing.expectEqual(@as(u32, 3), p.introspections);
@@ -1094,6 +1110,28 @@ test "a resource server's bearer check: JWT access tokens with the key set, or i
     const forged = (try verifier.check(io, &http, arena, .{ .authorization = "Bearer eyJhbGciOiJFZERTQSJ9.e30.AAAA" }, &.{})).refused;
     try testing.expectEqual(std.http.Status.unauthorized, forged.status);
 
+    // A certificate-bound token (RFC 8705 §3): taken over the connection
+    // whose certificate it names, refused over another or none; an unbound
+    // token over mutual TLS passes.
+    const certificate = "a client certificate's DER";
+    var x5t: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(certificate, &x5t, .{});
+    var x5t_text: [43]u8 = undefined;
+    var x5t_w: std.Io.Writer = .fixed(&x5t_text);
+    try clearance.base64url.encode(&x5t_w, &x5t);
+    token.clearRetainingCapacity();
+    try token.writer.writeAll("Bearer ");
+    try signClaims(gpa, io, &token.writer, "k1", .{ .iss = "https://as.example", .aud = "https://rs.example/mcp", .sub = "u1", .client_id = "app", .exp = now + 600, .iat = now, .jti = "j3", .cnf = .{ .@"x5t#S256" = @as([]const u8, &x5t_text) } });
+    _ = (try verifier.check(io, &http, arena, .{ .authorization = token.written(), .client_certificate = certificate }, &.{})).allowed;
+    const other_certificate = (try verifier.check(io, &http, arena, .{ .authorization = token.written(), .client_certificate = "another" }, &.{})).refused;
+    try testing.expectEqualStrings("binding", other_certificate.challenge.error_description.?);
+    const no_certificate = (try verifier.check(io, &http, arena, .{ .authorization = token.written() }, &.{})).refused;
+    try testing.expectEqualStrings("binding", no_certificate.challenge.error_description.?);
+    token.clearRetainingCapacity();
+    try token.writer.writeAll("Bearer ");
+    try signClaims(gpa, io, &token.writer, "k1", .{ .iss = "https://as.example", .aud = "https://rs.example/mcp", .sub = "u1", .client_id = "app", .exp = now + 600, .iat = now, .jti = "j4" });
+    _ = (try verifier.check(io, &http, arena, .{ .authorization = token.written(), .client_certificate = certificate }, &.{})).allowed;
+
     // Introspection: the provider answers for the token `good`, naming its
     // own base as the audience.
     var introspector = try oauth.Introspector.init(gpa, p.url(&buffer, "/introspect"), p.base, .{ .id = "rs", .credentials = .{ .client_secret_basic = "pw" } }, .{});
@@ -1115,7 +1153,7 @@ test "an ID token from the code flow: the flow's nonce and the access token's ha
     var w: std.Io.Writer.Allocating = .init(testing.allocator);
     defer w.deinit();
     const server: oauth.metadata.AuthorizationServer = .{ .issuer = "https://op.example", .authorization_endpoint = "https://op.example/authorize" };
-    var flow = try oauth.AuthorizationFlow.begin(io, &server, .{ .client_id = "app", .redirect_uri = "http://127.0.0.1/cb", .nonce = true }, &w.writer);
+    var flow = try oauth.AuthorizationFlow.begin(testing.allocator, io, &server, .{ .client_id = "app", .redirect_uri = "http://127.0.0.1/cb", .nonce = true }, &w.writer);
     defer flow.deinit();
     try testing.expect(std.mem.find(u8, w.written(), "&nonce=") != null);
 
@@ -1135,12 +1173,12 @@ test "an ID token from the code flow: the flow's nonce and the access token's ha
     var keys = try clearance.jwk.KeySet.parse(testing.allocator, "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"kid\":\"k1\",\"x\":\"" ++ ed25519_x ++ "\"}", .{});
     defer keys.deinit();
     var scratch: [2048]u8 = undefined;
-    const verified = try flow.verifyIdToken(void, &set, &server, "app", keys.keys, &.{.eddsa}, Io.Clock.real.now(io), &scratch);
+    const verified = try flow.verifyIdToken(void, &set, &server, "app", keys.keys, &.{.eddsa}, null, Io.Clock.real.now(io), &scratch);
     try testing.expectEqualStrings("u1", verified.registered.sub.?);
     // Another access token beside it fails its hash.
     var other = try oauth.TokenSet.init(testing.allocator, .{ .access_token = "other", .id_token = id.written() });
     defer other.deinit();
-    try testing.expectError(error.WrongAccessTokenHash, flow.verifyIdToken(void, &other, &server, "app", keys.keys, &.{.eddsa}, Io.Clock.real.now(io), &scratch));
+    try testing.expectError(error.WrongAccessTokenHash, flow.verifyIdToken(void, &other, &server, "app", keys.keys, &.{.eddsa}, null, Io.Clock.real.now(io), &scratch));
 }
 
 test "enterprise-managed authorization: the user's ID token exchanged for an ID-JAG, redeemed for an access token" {

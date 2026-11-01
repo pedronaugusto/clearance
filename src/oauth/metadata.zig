@@ -49,6 +49,50 @@ pub const AuthorizationServer = struct {
     backchannel_logout_session_supported: bool = false,
     frontchannel_logout_supported: bool = false,
     frontchannel_logout_session_supported: bool = false,
+    /// RFC 8705 §3.3: access tokens are bound to the client's certificate.
+    tls_client_certificate_bound_access_tokens: bool = false,
+    /// RFC 8705 §5: where a client using mutual TLS sends instead; an
+    /// endpoint absent here is the one above.
+    mtls_endpoint_aliases: ?MtlsAliases = null,
+    /// JAR (RFC 9101 §10.5) and OpenID Connect Discovery's request object
+    /// members.
+    require_signed_request_object: bool = false,
+    request_object_signing_alg_values_supported: ?[]const []const u8 = null,
+    request_object_encryption_alg_values_supported: ?[]const []const u8 = null,
+    request_object_encryption_enc_values_supported: ?[]const []const u8 = null,
+
+    pub const MtlsAliases = struct {
+        token_endpoint: ?[]const u8 = null,
+        revocation_endpoint: ?[]const u8 = null,
+        introspection_endpoint: ?[]const u8 = null,
+        device_authorization_endpoint: ?[]const u8 = null,
+        registration_endpoint: ?[]const u8 = null,
+        userinfo_endpoint: ?[]const u8 = null,
+        pushed_authorization_request_endpoint: ?[]const u8 = null,
+    };
+
+    /// The endpoints a request goes to, by name.
+    pub const Endpoint = enum {
+        token,
+        revocation,
+        introspection,
+        device_authorization,
+        registration,
+        userinfo,
+        pushed_authorization_request,
+
+        fn field(comptime e: Endpoint) []const u8 {
+            return @tagName(e) ++ "_endpoint";
+        }
+    };
+
+    /// Where a request to `which` goes: its mutual TLS alias when the
+    /// client uses mutual TLS and the server names one (RFC 8705 §5), else
+    /// the endpoint itself. Null when the server has neither.
+    pub fn endpoint(m: *const AuthorizationServer, comptime which: Endpoint, mutual_tls: bool) ?[]const u8 {
+        if (mutual_tls) if (m.mtls_endpoint_aliases) |aliases| if (@field(aliases, which.field())) |alias| return alias;
+        return @field(m, which.field());
+    }
 
     /// Whether S256 PKCE is listed. MCP's clients refuse a server that does
     /// not list it; OAuth 2.1 lets a server leave the list out.
@@ -133,6 +177,9 @@ pub fn readAuthorizationServer(gpa: std.mem.Allocator, body: []const u8, issuer:
     inline for (.{ "authorization_endpoint", "token_endpoint", "jwks_uri", "registration_endpoint", "introspection_endpoint", "device_authorization_endpoint", "revocation_endpoint", "pushed_authorization_request_endpoint", "userinfo_endpoint", "end_session_endpoint" }) |name| {
         if (@field(m, name)) |text| _ = url.endpoint(text) catch return error.InvalidEndpoint;
     }
+    if (m.mtls_endpoint_aliases) |aliases| inline for (@typeInfo(AuthorizationServer.MtlsAliases).@"struct".field_names) |name| {
+        if (@field(aliases, name)) |text| _ = url.endpoint(text) catch return error.InvalidEndpoint;
+    };
     return parsed;
 }
 
@@ -212,4 +259,26 @@ test "protected resource metadata: the resource matched, the servers issuers, an
     defer out.deinit();
     try m.value.write(&out.writer);
     try testing.expectEqualStrings(body, out.written());
+}
+
+test "RFC 8705 §5: a client over mutual TLS takes the aliases; one absent, or a client without, the endpoint itself" {
+    const body =
+        \\{"issuer":"https://server.example.com","authorization_endpoint":"https://server.example.com/authz",
+        \\"token_endpoint":"https://server.example.com/token","introspection_endpoint":"https://server.example.com/introspect",
+        \\"revocation_endpoint":"https://server.example.com/revo","jwks_uri":"https://server.example.com/jwks",
+        \\"token_endpoint_auth_methods_supported":["private_key_jwt","tls_client_auth","self_signed_tls_client_auth"],
+        \\"tls_client_certificate_bound_access_tokens":true,
+        \\"mtls_endpoint_aliases":{"token_endpoint":"https://mtls.example.com/token","revocation_endpoint":"https://mtls.example.com/revo",
+        \\"introspection_endpoint":"https://mtls.example.com/introspect"}}
+    ;
+    var m = try readAuthorizationServer(testing.allocator, body, "https://server.example.com", .{});
+    defer m.deinit();
+    const v = &m.value;
+    try testing.expect(v.tls_client_certificate_bound_access_tokens);
+    try testing.expectEqualStrings("https://mtls.example.com/token", v.endpoint(.token, true).?);
+    try testing.expectEqualStrings("https://server.example.com/token", v.endpoint(.token, false).?);
+    try testing.expectEqualStrings("https://mtls.example.com/introspect", v.endpoint(.introspection, true).?);
+    try testing.expect(v.endpoint(.userinfo, true) == null);
+    try testing.expect(v.endpoint(.pushed_authorization_request, false) == null);
+    try testing.expectError(error.InvalidEndpoint, readAuthorizationServer(testing.allocator, "{\"issuer\":\"https://a.example\",\"mtls_endpoint_aliases\":{\"token_endpoint\":\"http://a.example/token\"}}", "https://a.example", .{}));
 }

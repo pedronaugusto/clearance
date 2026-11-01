@@ -1,12 +1,15 @@
-//! JSON Web Keys (RFC 7517, 7518 §6, RFC 8037): a key or a set read into
-//! `Key`s, each checked as it is read, a private key read for signing, and
-//! thumbprints (RFC 7638, RFC 9278).
+//! JSON Web Keys (RFC 7517, 7518 §6, RFC 8037, RFC 9964): a key or a set read into
+//! `Key`s, each checked as it is read, for signatures or for encryption, a
+//! private key read for signing or decrypting, and thumbprints (RFC 7638,
+//! RFC 9278).
 const std = @import("std");
 const aegis = @import("aegis");
 const strand = @import("strand");
 const cloak = @import("cloak");
 const base64url = @import("base64url.zig");
 const Algorithm = @import("Algorithm.zig").Algorithm;
+const KeyManagement = @import("Algorithm.zig").KeyManagement;
+const ContentEncryption = @import("Algorithm.zig").ContentEncryption;
 const Key = @import("Key.zig");
 
 /// Sizes in options: `.literal("16KiB")`.
@@ -31,6 +34,9 @@ const Wire = struct {
     y: ?[]const u8 = null,
     // oct
     k: ?strand.json.Raw = null,
+    // AKP (RFC 9964): the public key, and the private one (ML-DSA's seed)
+    @"pub": ?[]const u8 = null,
+    priv: ?strand.json.Raw = null,
     // private members of RSA, EC and OKP keys
     d: ?strand.json.Raw = null,
     p: ?strand.json.Raw = null,
@@ -41,13 +47,29 @@ const Wire = struct {
     oth: ?strand.json.Raw = null,
 };
 
+/// What keys are read for. A key is read for one: a JWK's `use` and
+/// `key_ops` name signatures or encryption (RFC 7517 §4.2-4.3), and a key
+/// read for one is never used for the other.
+pub const Purpose = enum {
+    /// JWS: verifying or signing. RSA, EC, Ed25519, ML-DSA and HMAC keys.
+    signatures,
+    /// JWE: encrypting to the key or decrypting with it. RSA and EC keys,
+    /// X25519 keys, and AES or content keys (`oct`).
+    encryption,
+};
+
 /// Why a key was left out of a set.
 pub const Skip = enum {
-    /// `kty` or `crv` names a kind clearance does not verify with (X25519,
-    /// P-521, secp256k1, Ed448, AKP...).
+    /// `kty` or `crv` names a kind clearance does not use for the purpose
+    /// (for signatures X25519, for encryption Ed25519 and ML-DSA; secp256k1,
+    /// Ed448, an AKP key of an algorithm other than ML-DSA...).
     unsupported,
-    /// `use` is `enc`, or `key_ops` allows neither signing nor verifying.
+    /// Read for signatures: `use` is `enc`, or `key_ops` allows neither
+    /// signing nor verifying.
     not_for_signatures,
+    /// Read for encryption: `use` is `sig`, or `key_ops` allows neither
+    /// encrypting nor decrypting.
+    not_for_encryption,
     /// `alg` names an algorithm clearance does not have, or one the key's
     /// kind cannot use.
     algorithm,
@@ -64,6 +86,7 @@ pub const Skip = enum {
 };
 
 pub const Options = struct {
+    purpose: Purpose = .signatures,
     /// Whether `oct` (HMAC) keys are taken. Off for a set fetched from a
     /// server: a published key set holds public keys.
     secrets: bool = false,
@@ -76,7 +99,7 @@ pub const Options = struct {
     min_rsa_bits: u16 = 2048,
 
     fn read(options: Options) Reading {
-        return .{ .secrets = options.secrets, .min_rsa_bits = options.min_rsa_bits };
+        return .{ .purpose = options.purpose, .secrets = options.secrets, .min_rsa_bits = options.min_rsa_bits };
     }
 };
 
@@ -105,12 +128,14 @@ pub const KeySet = struct {
     /// `deinit`: it holds every secret member the document had, the ones
     /// left out among them.
     document: aegis.SecretBytes,
+    /// What the secret bytes were allocated with, which frees them.
+    gpa: std.mem.Allocator,
 
     /// Reads `{"keys":[...]}`, or a single JWK as a set of one.
     pub fn parse(gpa: std.mem.Allocator, document: []const u8, options: Options) ParseError!KeySet {
         const limit: usize = options.max_bytes.raw();
         if (document.len > limit) return error.TooLarge;
-        var set: KeySet = .{ .keys = &.{}, .skipped = .initFill(0), .arena = .init(gpa), .secrets = null, .document = try .init(gpa, document.len) };
+        var set: KeySet = .{ .keys = &.{}, .skipped = .initFill(0), .arena = .init(gpa), .secrets = null, .document = try .init(gpa, document.len), .gpa = gpa };
         errdefer set.deinit();
         const arena = set.arena.allocator();
         // The keys outlive the caller's document: strings read from it borrow the copy.
@@ -180,8 +205,8 @@ pub const KeySet = struct {
     }
 
     pub fn deinit(set: *KeySet) void {
-        if (set.secrets) |*s| s.deinit();
-        set.document.deinit();
+        if (set.secrets) |*s| s.deinit(set.gpa);
+        set.document.deinit(set.gpa);
         set.arena.deinit();
         set.* = undefined;
     }
@@ -196,6 +221,8 @@ pub const KeySet = struct {
 
 /// How `PrivateKey.parse` reads.
 pub const PrivateOptions = struct {
+    /// Signing (JWS), or decrypting (JWE: RSA, EC and X25519 keys).
+    purpose: Purpose = .signatures,
     /// The largest document read.
     max_bytes: Bytes = .literal("64KiB"),
     /// RSA moduli shorter than this are refused (and any shorter than
@@ -208,14 +235,18 @@ pub const PrivateError = error{
     /// Not one JSON object with a `kty`.
     InvalidDocument,
     TooLarge,
-    /// A `kty` or `crv` clearance does not sign with (X25519, P-521, a
-    /// multi-prime RSA key, an RSA key without its CRT members), or `oct`:
-    /// an HMAC secret is read by `KeySet.parse` with `secrets`.
+    /// A `kty` or `crv` clearance does not sign with (X25519, a multi-prime
+    /// RSA key, an RSA key without its CRT members), or `oct`: an HMAC
+    /// secret is read by `KeySet.parse` with `secrets`.
     UnsupportedKey,
     /// A public key: no private member.
     NotPrivate,
-    /// `use` is `enc`, or `key_ops` does not allow signing.
+    /// Read for signing: `use` is `enc`, or `key_ops` does not allow
+    /// signing.
     NotForSigning,
+    /// Read for decrypting: `use` is `sig`, or `key_ops` does not allow
+    /// decrypting.
+    NotForDecryption,
     /// `alg` names an algorithm clearance does not have, or one the key
     /// cannot sign with.
     InvalidAlgorithm,
@@ -225,9 +256,11 @@ pub const PrivateError = error{
     InvalidKey,
 } || std.mem.Allocator.Error;
 
-/// A private JWK read for signing (RFC 7518 §6.2.2, §6.3.2, RFC 8037 §2): an
-/// EC key on P-256 or P-384, an Ed25519 key, or a two-prime RSA key with its
-/// CRT members. `jws.Signer.fromJwk` signs with it.
+/// A private JWK read for signing (RFC 7518 §6.2.2, §6.3.2, RFC 8037 §2, RFC
+/// 9964 §4): an EC key on P-256, P-384 or P-521, an Ed25519 key, a two-prime
+/// RSA key with its CRT members, or an ML-DSA key by its 32-byte seed;
+/// `jws.Signer.fromJwk` signs with it. Or read for decrypting:
+/// an RSA, EC or X25519 key (RFC 8037 §3.2), which `jwe.Key.fromJwk` holds.
 pub const PrivateKey = struct {
     /// The key, as cloak holds it: wiped when its last owner releases it.
     key: cloak.PrivateKey,
@@ -244,7 +277,7 @@ pub const PrivateKey = struct {
         const limit: usize = options.max_bytes.raw();
         if (document.len > limit) return error.TooLarge;
         var text = try aegis.SecretBytes.init(gpa, document.len);
-        defer text.deinit();
+        defer text.deinit(gpa);
         // unreachable: a fresh allocation of the document's length
         text.replace(document) catch unreachable;
         var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -255,7 +288,8 @@ pub const PrivateKey = struct {
             else => error.InvalidDocument,
         };
         if (std.mem.eql(u8, w.kty, "oct") or w.oth != null) return error.UnsupportedKey;
-        if (w.d == null) return error.NotPrivate;
+        // An AKP key's private member is `priv` (RFC 9964 §3), the others' `d`.
+        const secret_member = (if (std.mem.eql(u8, w.kty, "AKP")) w.priv else w.d) orelse return error.NotPrivate;
 
         // The public half, through the same checks a key set's keys get.
         var public_wire = w;
@@ -265,24 +299,29 @@ pub const PrivateKey = struct {
         public_wire.dp = null;
         public_wire.dq = null;
         public_wire.qi = null;
+        public_wire.priv = null;
         var why: Skip = undefined;
         var no_secrets: Secrets = .{ .storage = &.{} };
-        var public = read(arena.allocator(), public_wire, .{ .secrets = false, .min_rsa_bits = options.min_rsa_bits }, &no_secrets, &why) catch |err| switch (err) {
+        var public = read(arena.allocator(), public_wire, .{ .purpose = options.purpose, .secrets = false, .min_rsa_bits = options.min_rsa_bits }, &no_secrets, &why) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Skipped => return switch (why) {
                 .unsupported => error.UnsupportedKey,
                 .not_for_signatures => error.NotForSigning,
+                .not_for_encryption => error.NotForDecryption,
                 .algorithm => error.InvalidAlgorithm,
                 // unreachable: no set, no secret, no private member
                 .secret, .private, .duplicate => unreachable,
                 .invalid => error.InvalidKey,
             },
         };
-        if (!public.sign) return error.NotForSigning;
+        switch (options.purpose) {
+            .signatures => if (!public.sign) return error.NotForSigning,
+            .encryption => if (!public.decrypt) return error.NotForDecryption,
+        }
         // The kid borrowed the document, which is wiped on return.
         if (public.kid) |kid| public.kid = try arena.allocator().dupe(u8, kid);
 
-        const d = rawText(w.d.?) orelse return error.InvalidKey;
+        const d = rawText(secret_member) orelse return error.InvalidKey;
         const rsa_members = [_]?strand.json.Raw{ w.p, w.q, w.dp, w.dq, w.qi };
         var length = base64url.decodedLength(d) catch return error.InvalidKey;
         if (public.material == .rsa) for (rsa_members) |member| {
@@ -290,18 +329,31 @@ pub const PrivateKey = struct {
             length += base64url.decodedLength(member_text) catch return error.InvalidKey;
         };
         var numbers = try aegis.SecretBytes.init(gpa, length);
-        defer numbers.deinit();
+        defer numbers.deinit(gpa);
         // unreachable: the length is the capacity just allocated
         numbers.resizeWithinCapacity(length) catch unreachable;
         const storage = numbers.exposeMut();
         var used: usize = 0;
         const private_scalar = decodeInto(storage, &used, d) orelse return error.InvalidKey;
         const components: cloak.PrivateKey.Components = switch (public.material) {
-            .ec => |ec| .{ .ec = .{ .curve = switch (ec.curve) {
-                .p256 => .p256,
-                .p384 => .p384,
-            }, .d = private_scalar, .public = ec.point } },
-            .okp => |okp| .{ .ed25519 = .{ .seed = private_scalar, .public = okp.x } },
+            .ec => |ec| .{
+                .ec = .{
+                    .curve = switch (ec.curve) {
+                        .p256 => .p256,
+                        .p384 => .p384,
+                        .p521 => .p521,
+                    },
+                    .d = private_scalar,
+                    .public = ec.point,
+                },
+            },
+            .okp => |okp| switch (okp.curve) {
+                .ed25519 => .{ .ed25519 = .{ .seed = private_scalar, .public = okp.x } },
+                .x25519 => .{ .x25519 = .{ .d = private_scalar, .public = okp.x } },
+            },
+            // The seed, the one private form RFC 9964 §4 defines; the public
+            // key derived from it and compared with `pub`.
+            .akp => |akp| .{ .mldsa = .{ .level = akp.level, .seed = private_scalar, .public = akp.public } },
             .rsa => |rsa| blk: {
                 var members: [5][]const u8 = undefined;
                 for (rsa_members, &members) |member, *out| out.* = decodeInto(storage, &used, rawText(member.?).?) orelse return error.InvalidKey;
@@ -356,7 +408,7 @@ fn duplicated(wires: []const Wire, i: usize) bool {
 const ReadError = error{Skipped} || std.mem.Allocator.Error;
 
 /// What `read` takes from a set's or a private key's options.
-const Reading = struct { secrets: bool, min_rsa_bits: u16 };
+const Reading = struct { purpose: Purpose, secrets: bool, min_rsa_bits: u16 };
 
 /// Where `oct` keys' bytes are decoded: the set's wiped storage.
 const Secrets = struct { storage: []u8, used: usize = 0 };
@@ -370,19 +422,9 @@ fn skip(reason: *Skip, why: Skip) error{Skipped} {
 /// `error.Skipped` with the reason in `why`.
 fn read(arena: std.mem.Allocator, w: Wire, options: Reading, secrets: *Secrets, why: *Skip) ReadError!Key {
     var key: Key = .{ .material = undefined, .kid = w.kid };
-    if (w.use) |use| {
-        if (std.mem.eql(u8, use, "sig")) key.use = .sig else if (std.mem.eql(u8, use, "enc")) return skip(why, .not_for_signatures) else return skip(why, .invalid);
-    }
-    if (w.key_ops) |ops| {
-        key.verify = false;
-        key.sign = false;
-        for (ops) |op| {
-            if (std.mem.eql(u8, op, "verify")) key.verify = true;
-            if (std.mem.eql(u8, op, "sign")) key.sign = true;
-        }
-        if (!key.verify and !key.sign) return skip(why, .not_for_signatures);
-    }
-    const private = w.d != null or w.p != null or w.q != null or w.dp != null or w.dq != null or w.qi != null or w.oth != null;
+    const signatures = options.purpose == .signatures;
+    try readUse(w, signatures, &key, why);
+    const private = w.d != null or w.p != null or w.q != null or w.dp != null or w.dq != null or w.qi != null or w.oth != null or w.priv != null;
     if (std.mem.eql(u8, w.kty, "RSA")) {
         if (private) return skip(why, .private);
         const n = try decodeMember(arena, w.n) orelse return skip(why, .invalid);
@@ -396,8 +438,12 @@ fn read(arena: std.mem.Allocator, w: Wire, options: Reading, secrets: *Secrets, 
     } else if (std.mem.eql(u8, w.kty, "EC")) {
         if (private) return skip(why, .private);
         const crv = w.crv orelse return skip(why, .invalid);
-        const curve: Key.Curve = if (std.mem.eql(u8, crv, "P-256")) .p256 else if (std.mem.eql(u8, crv, "P-384")) .p384 else return skip(why, .unsupported);
-        const width: usize = if (curve == .p256) 32 else 48;
+        const curve: Key.Curve = if (std.mem.eql(u8, crv, "P-256")) .p256 else if (std.mem.eql(u8, crv, "P-384")) .p384 else if (std.mem.eql(u8, crv, "P-521")) .p521 else return skip(why, .unsupported);
+        const width: usize = switch (curve) {
+            .p256 => 32,
+            .p384 => 48,
+            .p521 => 66,
+        };
         const x = try decodeMember(arena, w.x) orelse return skip(why, .invalid);
         const y = try decodeMember(arena, w.y) orelse return skip(why, .invalid);
         // Exactly the field's width (RFC 7518 §6.2.1.2-3).
@@ -406,20 +452,29 @@ fn read(arena: std.mem.Allocator, w: Wire, options: Reading, secrets: *Secrets, 
         point[0] = 4;
         @memcpy(point[1..][0..width], x);
         @memcpy(point[1 + width ..], y);
-        const valid = switch (curve) {
-            .p256 => if (std.crypto.sign.ecdsa.EcdsaP256Sha256.PublicKey.fromSec1(point)) |_| true else |_| false,
-            .p384 => if (std.crypto.sign.ecdsa.EcdsaP384Sha384.PublicKey.fromSec1(point)) |_| true else |_| false,
-        };
-        if (!valid) return skip(why, .invalid);
+        // cloak's checks for every EC public key: on the curve, not the identity.
+        cloak.certificates.certificate.Algorithm.checkEc(curve, point) catch return skip(why, .invalid);
         key.material = .{ .ec = .{ .curve = curve, .point = point } };
     } else if (std.mem.eql(u8, w.kty, "OKP")) {
         if (private) return skip(why, .private);
         const crv = w.crv orelse return skip(why, .invalid);
-        if (!std.mem.eql(u8, crv, "Ed25519")) return skip(why, .unsupported);
+        const curve: Key.OkpCurve = if (signatures and std.mem.eql(u8, crv, "Ed25519")) .ed25519 else if (!signatures and std.mem.eql(u8, crv, "X25519")) .x25519 else return skip(why, .unsupported);
         const x = try decodeMember(arena, w.x) orelse return skip(why, .invalid);
         if (x.len != 32) return skip(why, .invalid);
-        _ = std.crypto.sign.Ed25519.PublicKey.fromBytes(x[0..32].*) catch return skip(why, .invalid);
-        key.material = .{ .okp = .{ .x = x } };
+        // Every 32 bytes are an X25519 key (RFC 7748 §5); an agreement
+        // refuses the ones of small order.
+        if (curve == .ed25519) _ = std.crypto.sign.Ed25519.PublicKey.fromBytes(x[0..32].*) catch return skip(why, .invalid);
+        key.material = .{ .okp = .{ .curve = curve, .x = x } };
+    } else if (std.mem.eql(u8, w.kty, "AKP")) {
+        if (!signatures) return skip(why, .unsupported);
+        if (private) return skip(why, .private);
+        // `alg` is required (RFC 9964 §3): the key is for that algorithm alone.
+        const alg = Algorithm.parse(w.alg orelse return skip(why, .invalid)) orelse return skip(why, .unsupported);
+        const level = alg.mldsa() orelse return skip(why, .algorithm);
+        const public = try decodeMember(arena, w.@"pub") orelse return skip(why, .invalid);
+        // FIPS 204's pkDecode takes any bytes of the level's length (RFC 9964 §7.3).
+        if (public.len != cloak.certificates.certificate.Algorithm.mldsaPublicKeyLength(level)) return skip(why, .invalid);
+        key.material = .{ .akp = .{ .level = level, .public = public } };
     } else if (std.mem.eql(u8, w.kty, "oct")) {
         if (!options.secrets) return skip(why, .secret);
         const k = rawText(w.k orelse return skip(why, .invalid)) orelse return skip(why, .invalid);
@@ -432,12 +487,75 @@ fn read(arena: std.mem.Allocator, w: Wire, options: Reading, secrets: *Secrets, 
         key.material = .{ .hmac = secret };
     } else return skip(why, .unsupported);
     if (w.alg) |name| {
-        const alg = Algorithm.parse(name) orelse return skip(why, .algorithm);
-        if (alg.family() != std.meta.activeTag(key.material)) return skip(why, .algorithm);
-        if (alg.curve()) |c| if (key.material.ec.curve != c) return skip(why, .algorithm);
-        key.alg = alg;
+        if (signatures) {
+            const alg = Algorithm.parse(name) orelse return skip(why, .algorithm);
+            if (alg.family() != std.meta.activeTag(key.material)) return skip(why, .algorithm);
+            if (alg.curve()) |c| if (key.material.ec.curve != c) return skip(why, .algorithm);
+            key.alg = alg;
+        } else if (KeyManagement.parse(name)) |alg| {
+            const fits = switch (alg.kind()) {
+                .rsa => key.material == .rsa,
+                .agreement => key.material == .ec or key.material == .okp,
+                .wrap, .gcm_wrap => key.material == .hmac and key.material.hmac.len == alg.wrapLength().?,
+                // `dir` with no content named: any content key's length.
+                .direct => key.material == .hmac,
+                .password => false,
+            };
+            if (!fits) return skip(why, .algorithm);
+            key.management = alg;
+        } else if (ContentEncryption.parse(name)) |enc| {
+            // A content key itself (`dir`), of that content's length.
+            if (key.material != .hmac or key.material.hmac.len != enc.keyLength()) return skip(why, .algorithm);
+            key.content = enc;
+        } else return skip(why, .algorithm);
     }
     return key;
+}
+
+/// `use` and `key_ops` into `key` for the purpose read: a key read for one
+/// does nothing of the other's.
+fn readUse(w: Wire, signatures: bool, key: *Key, why: *Skip) error{Skipped}!void {
+    if (signatures) {
+        key.encrypt = false;
+        key.decrypt = false;
+    } else {
+        key.verify = false;
+        key.sign = false;
+    }
+    if (w.use) |use| {
+        if (std.mem.eql(u8, use, "sig")) {
+            if (!signatures) return skip(why, .not_for_encryption);
+            key.use = .sig;
+        } else if (std.mem.eql(u8, use, "enc")) {
+            if (signatures) return skip(why, .not_for_signatures);
+            key.use = .enc;
+        } else return skip(why, .invalid);
+    }
+    if (w.key_ops) |ops| {
+        var verify = false;
+        var sign = false;
+        var encrypt = false;
+        var decrypt = false;
+        for (ops) |op| {
+            if (std.mem.eql(u8, op, "verify")) verify = true;
+            if (std.mem.eql(u8, op, "sign")) sign = true;
+            if (std.mem.eql(u8, op, "encrypt") or std.mem.eql(u8, op, "wrapKey")) encrypt = true;
+            if (std.mem.eql(u8, op, "decrypt") or std.mem.eql(u8, op, "unwrapKey")) decrypt = true;
+            if (std.mem.eql(u8, op, "deriveKey") or std.mem.eql(u8, op, "deriveBits")) {
+                encrypt = true;
+                decrypt = true;
+            }
+        }
+        if (signatures) {
+            key.verify = verify;
+            key.sign = sign;
+            if (!verify and !sign) return skip(why, .not_for_signatures);
+        } else {
+            key.encrypt = encrypt;
+            key.decrypt = decrypt;
+            if (!encrypt and !decrypt) return skip(why, .not_for_encryption);
+        }
+    }
 }
 
 /// A member decoded, or null when it is missing or not base64url.
@@ -470,8 +588,12 @@ pub const PublicError = error{
     UnsupportedKey,
     /// Private members, or an `oct` key: not a public key.
     NotPublic,
-    /// `use` is `enc`, or `key_ops` does not allow verifying.
+    /// Read for signatures: `use` is `enc`, or `key_ops` does not allow
+    /// verifying.
     NotForSignatures,
+    /// Read for encryption: `use` is `sig`, or `key_ops` does not allow
+    /// encrypting to the key.
+    NotForEncryption,
     /// `alg` names an algorithm clearance does not have, or one the key
     /// cannot use.
     InvalidAlgorithm,
@@ -481,7 +603,7 @@ pub const PublicError = error{
 /// key whose bytes live in `arena`, through the checks a key set's keys
 /// get. A key with private members or a secret one is refused, never read
 /// as public.
-pub fn readPublic(arena: std.mem.Allocator, document: []const u8, min_rsa_bits: u16) PublicError!Key {
+pub fn readPublic(arena: std.mem.Allocator, document: []const u8, purpose: Purpose, min_rsa_bits: u16) PublicError!Key {
     const parse_options: strand.json.ParseOptions = .{ .ignore_unknown_fields = true, .limits = .{ .depth = 8 } };
     const w = strand.json.parseLeaky(Wire, arena, document, parse_options) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
@@ -489,11 +611,12 @@ pub fn readPublic(arena: std.mem.Allocator, document: []const u8, min_rsa_bits: 
     };
     var why: Skip = undefined;
     var no_secrets: Secrets = .{ .storage = &.{} };
-    const key = read(arena, w, .{ .secrets = false, .min_rsa_bits = min_rsa_bits }, &no_secrets, &why) catch |err| switch (err) {
+    const key = read(arena, w, .{ .purpose = purpose, .secrets = false, .min_rsa_bits = min_rsa_bits }, &no_secrets, &why) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Skipped => return switch (why) {
             .unsupported => error.UnsupportedKey,
             .not_for_signatures => error.NotForSignatures,
+            .not_for_encryption => error.NotForEncryption,
             .algorithm => error.InvalidAlgorithm,
             .secret, .private => error.NotPublic,
             // unreachable: one key, no set to share a kid with
@@ -501,7 +624,10 @@ pub fn readPublic(arena: std.mem.Allocator, document: []const u8, min_rsa_bits: 
             .invalid => error.InvalidKey,
         },
     };
-    if (!key.verify) return error.NotForSignatures;
+    switch (purpose) {
+        .signatures => if (!key.verify) return error.NotForSignatures,
+        .encryption => if (!key.encrypt) return error.NotForEncryption,
+    }
     return key;
 }
 
@@ -536,15 +662,27 @@ fn writeRequired(w: *std.Io.Writer, key: Key) std.Io.Writer.Error!void {
         },
         .ec => |ec| {
             const width = (ec.point.len - 1) / 2;
-            try w.writeAll(if (ec.curve == .p256) "{\"crv\":\"P-256\",\"kty\":\"EC\",\"x\":\"" else "{\"crv\":\"P-384\",\"kty\":\"EC\",\"x\":\"");
+            try w.writeAll(switch (ec.curve) {
+                .p256 => "{\"crv\":\"P-256\",\"kty\":\"EC\",\"x\":\"",
+                .p384 => "{\"crv\":\"P-384\",\"kty\":\"EC\",\"x\":\"",
+                .p521 => "{\"crv\":\"P-521\",\"kty\":\"EC\",\"x\":\"",
+            });
             try base64url.encode(w, ec.point[1..][0..width]);
             try w.writeAll("\",\"y\":\"");
             try base64url.encode(w, ec.point[1 + width ..]);
             try w.writeAll("\"}");
         },
         .okp => |okp| {
-            try w.writeAll("{\"crv\":\"Ed25519\",\"kty\":\"OKP\",\"x\":\"");
+            try w.writeAll(if (okp.curve == .ed25519) "{\"crv\":\"Ed25519\",\"kty\":\"OKP\",\"x\":\"" else "{\"crv\":\"X25519\",\"kty\":\"OKP\",\"x\":\"");
             try base64url.encode(w, okp.x);
+            try w.writeAll("\"}");
+        },
+        // RFC 9964 §6: `alg`, `kty`, `pub`.
+        .akp => |akp| {
+            try w.writeAll("{\"alg\":\"");
+            try w.writeAll(Algorithm.ofMlDsa(akp.level).name());
+            try w.writeAll("\",\"kty\":\"AKP\",\"pub\":\"");
+            try base64url.encode(w, akp.public);
             try w.writeAll("\"}");
         },
         .hmac => |secret| {

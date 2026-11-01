@@ -2,10 +2,11 @@
 const gantry = @import("gantry");
 
 pub const layers: []const gantry.rules.Layer = &.{
-    .{ .name = "codecs", .patterns = &.{"src/base64url.zig"} },
+    .{ .name = "codecs", .patterns = &.{ "src/base64url.zig", "src/time.zig" } },
     .{ .name = "algorithms", .patterns = &.{"src/Algorithm.zig"} },
     .{ .name = "keys", .patterns = &.{ "src/Key.zig", "src/jwk.zig" } },
     .{ .name = "JWS", .patterns = &.{"src/jws.zig"} },
+    .{ .name = "JWE", .patterns = &.{"src/jwe.zig"} },
     .{ .name = "JWT", .patterns = &.{"src/jwt.zig"} },
     .{ .name = "JWT profiles", .patterns = &.{ "src/id_token.zig", "src/access_token.zig", "src/dpop.zig", "src/logout.zig" } },
     .{ .name = "public", .patterns = &.{"src/clearance.zig"} },
@@ -24,6 +25,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/oauth/revocation.zig",
         "src/oauth/dpop.zig",
         "src/oauth/par.zig",
+        "src/oauth/request_object.zig",
         "src/oauth/userinfo.zig",
         "src/oauth/logout.zig",
         "src/oauth/registration.zig",

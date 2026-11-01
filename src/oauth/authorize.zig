@@ -99,6 +99,25 @@ pub const Params = struct {
     }
 };
 
+/// Writes the URL of a request object sent by value (RFC 9101 §5.1):
+/// `client_id` and `request` (`request_object.write`'s JWT), with
+/// `response_type`, and `scope` when it asks for `openid`, repeated as
+/// OpenID Connect Core §6.1 requires of a request object. The rest is the
+/// object's alone: a server reads no parameter outside it.
+pub fn writeSignedUrl(w: *std.Io.Writer, endpoint: []const u8, request: Request, object: []const u8) WriteError!void {
+    var separator = try writeEndpoint(w, endpoint);
+    try param(w, &separator, .{ .name = "client_id", .value = request.client_id });
+    try param(w, &separator, .{ .name = "response_type", .value = "code" });
+    if (request.scope) |scope| {
+        var words = std.mem.tokenizeScalar(u8, scope, ' ');
+        while (words.next()) |word| if (std.mem.eql(u8, word, "openid")) {
+            try param(w, &separator, .{ .name = "scope", .value = scope });
+            break;
+        };
+    }
+    try param(w, &separator, .{ .name = "request", .value = object });
+}
+
 /// Writes the authorization URL of a pushed request (RFC 9126 §4): the
 /// client and the `request_uri` the push was answered with.
 pub fn writePushedUrl(w: *std.Io.Writer, endpoint: []const u8, client_id: []const u8, request_uri: []const u8) WriteError!void {
@@ -262,4 +281,17 @@ test "RFC 9207: iss compared as a string, required when advertised, checked when
     _ = try readCallback("code=c&state=s", silent, &scratch);
     try std.testing.expectError(error.IssuerMismatch, readCallback("code=c&state=s&iss=https%3A%2F%2Fevil.example%2F", silent, &scratch));
     try std.testing.expectError(error.IssuerMismatch, readCallback("error=access_denied&state=s&iss=x", silent, &scratch));
+}
+
+test "a request object by value: client_id and request, response_type always, scope for OpenID Connect" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const ask: Request = .{ .client_id = "s6BhdRkqt3", .redirect_uri = "https://client.example.org/cb", .state = "s", .code_challenge = "c", .scope = "openid email" };
+    try writeSignedUrl(&out.writer, "https://server.example.com/authorize", ask, "e.y.j");
+    try std.testing.expectEqualStrings("https://server.example.com/authorize?client_id=s6BhdRkqt3&response_type=code&scope=openid+email&request=e.y.j", out.written());
+    out.clearRetainingCapacity();
+    var plain = ask;
+    plain.scope = "files:read";
+    try writeSignedUrl(&out.writer, "https://server.example.com/authorize?tenant=a", plain, "e.y.j");
+    try std.testing.expectEqualStrings("https://server.example.com/authorize?tenant=a&client_id=s6BhdRkqt3&response_type=code&request=e.y.j", out.written());
 }

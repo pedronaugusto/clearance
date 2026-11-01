@@ -5,6 +5,7 @@
 //! cache holds at most a count of answers; when full, expired ones go first,
 //! then the one closest to expiry.
 const std = @import("std");
+const time = @import("clearance").time;
 const aegis = @import("aegis");
 const uplink = @import("uplink");
 const client_auth = @import("../client_auth.zig");
@@ -52,9 +53,10 @@ issuer: []const u8,
 /// The resource server's credentials, borrowed.
 client: client_auth.Client,
 options: Options,
-mutex: std.Io.Mutex = .init,
-/// Guarded by `mutex`.
-entries: std.AutoHashMapUnmanaged([32]u8, Entry) = .empty,
+/// The answers kept, by the token's hash.
+entries: aegis.BlockingGuarded(Entries) = .init(.empty),
+
+const Entries = std.AutoHashMapUnmanaged([32]u8, Entry);
 
 /// An introspector asking `endpoint` (the metadata's
 /// `introspection_endpoint`) of the server `issuer`, as `client`. `gpa`
@@ -67,9 +69,10 @@ pub fn init(gpa: std.mem.Allocator, endpoint: []const u8, issuer: []const u8, cl
 }
 
 pub fn deinit(i: *Introspector) void {
-    var it = i.entries.valueIterator();
+    const entries = i.entries.teardown();
+    var it = entries.valueIterator();
     while (it.next()) |e| drop(i.gpa, e);
-    i.entries.deinit(i.gpa);
+    entries.deinit(i.gpa);
     i.gpa.free(i.endpoint);
     i.gpa.free(i.issuer);
     i.* = undefined;
@@ -86,11 +89,11 @@ pub fn introspect(i: *Introspector, io: std.Io, http: *uplink.Client, arena: std
     var key: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(token, &key, .{});
     const now = std.Io.Clock.real.now(io);
-    const now_s: i64 = @intCast(@divFloor(now.nanoseconds, std.time.ns_per_s));
+    const now_s: i64 = time.unixSeconds(now);
     {
-        try i.mutex.lock(io);
-        defer i.mutex.unlock(io);
-        if (i.entries.get(key)) |e| if (now_s < e.until) return .{ .introspected = try clone(arena, e.value) };
+        var held = try i.entries.acquire(io);
+        defer held.deinit(io);
+        if (held.value().get(key)) |e| if (now_s < e.until) return .{ .introspected = try clone(arena, e.value) };
     }
 
     var request = try introspection.request(i.gpa, io, i.client, token, .{ .issuer = i.issuer, .now = now });
@@ -114,10 +117,11 @@ pub fn introspect(i: *Introspector, io: std.Io, http: *uplink.Client, arena: std
     entry.until = if (value.active) @min(bound, value.exp orelse bound) else bound;
     if (entry.until <= now_s or i.options.max_entries == 0) return .{ .introspected = out };
 
-    try i.mutex.lock(io);
-    defer i.mutex.unlock(io);
-    if (i.entries.count() >= i.options.max_entries) i.evict(now_s);
-    const slot = try i.entries.getOrPut(i.gpa, key);
+    var held = try i.entries.acquire(io);
+    defer held.deinit(io);
+    const entries = held.value();
+    if (entries.count() >= i.options.max_entries) evict(i.gpa, entries, now_s);
+    const slot = try entries.getOrPut(i.gpa, key);
     if (slot.found_existing) drop(i.gpa, slot.value_ptr);
     slot.value_ptr.* = entry;
     kept = true;
@@ -126,29 +130,29 @@ pub fn introspect(i: *Introspector, io: std.Io, http: *uplink.Client, arena: std
 
 /// Makes room for one: every expired answer dropped, else the one closest
 /// to its expiry.
-fn evict(i: *Introspector, now: i64) void {
+fn evict(gpa: std.mem.Allocator, entries: *Entries, now: i64) void {
     var soonest: ?[32]u8 = null;
     var soonest_until: i64 = std.math.maxInt(i64);
     var expired: std.ArrayList([32]u8) = .empty;
-    defer expired.deinit(i.gpa);
-    var it = i.entries.iterator();
+    defer expired.deinit(gpa);
+    var it = entries.iterator();
     while (it.next()) |e| {
         if (e.value_ptr.until <= now) {
             // Without room to list more, those listed are dropped, or the soonest.
-            expired.append(i.gpa, e.key_ptr.*) catch break;
+            expired.append(gpa, e.key_ptr.*) catch break;
         } else if (e.value_ptr.until < soonest_until) {
             soonest_until = e.value_ptr.until;
             soonest = e.key_ptr.*;
         }
     }
-    for (expired.items) |k| if (i.entries.fetchRemove(k)) |kv| {
+    for (expired.items) |k| if (entries.fetchRemove(k)) |kv| {
         var e = kv.value;
-        drop(i.gpa, &e);
+        drop(gpa, &e);
     };
     if (expired.items.len != 0) return;
-    if (soonest) |k| if (i.entries.fetchRemove(k)) |kv| {
+    if (soonest) |k| if (entries.fetchRemove(k)) |kv| {
         var e = kv.value;
-        drop(i.gpa, &e);
+        drop(gpa, &e);
     };
 }
 

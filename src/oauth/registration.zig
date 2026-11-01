@@ -42,6 +42,29 @@ pub const ClientMetadata = struct {
     /// renders in an iframe, and whether it gets `iss` and `sid`.
     frontchannel_logout_uri: ?[]const u8 = null,
     frontchannel_logout_session_required: ?bool = null,
+    /// RFC 8705 §2.1.2: what of the certificate names the client under
+    /// `tls_client_auth`, one of these.
+    tls_client_auth_subject_dn: ?[]const u8 = null,
+    tls_client_auth_san_dns: ?[]const u8 = null,
+    tls_client_auth_san_uri: ?[]const u8 = null,
+    tls_client_auth_san_ip: ?[]const u8 = null,
+    tls_client_auth_san_email: ?[]const u8 = null,
+    /// RFC 8705 §3.4: the client asks for certificate-bound access tokens.
+    tls_client_certificate_bound_access_tokens: ?bool = null,
+    /// JAR (RFC 9101 §10.4) and OpenID Connect Registration: the request
+    /// object's signing algorithm, the encryption of it, and whether every
+    /// authorization request must carry one.
+    request_object_signing_alg: ?[]const u8 = null,
+    request_object_encryption_alg: ?[]const u8 = null,
+    request_object_encryption_enc: ?[]const u8 = null,
+    require_signed_request_object: ?bool = null,
+    /// OpenID Connect Registration §2: encrypted ID tokens and UserInfo
+    /// answers (`id_token.Expected.decryption`, `userinfo.Expected.encrypted`).
+    id_token_encrypted_response_alg: ?[]const u8 = null,
+    id_token_encrypted_response_enc: ?[]const u8 = null,
+    userinfo_signed_response_alg: ?[]const u8 = null,
+    userinfo_encrypted_response_alg: ?[]const u8 = null,
+    userinfo_encrypted_response_enc: ?[]const u8 = null,
 };
 
 pub const ApplicationType = enum { native, web };
@@ -96,9 +119,11 @@ pub const Registration = struct {
     scope: ?[]const u8 = null,
     /// Private: holds every string above.
     storage: aegis.SecretBytes,
+    /// What the secret bytes were allocated with, which frees them.
+    gpa: std.mem.Allocator,
 
     pub fn deinit(r: *Registration) void {
-        r.storage.deinit();
+        r.storage.deinit(r.gpa);
         r.* = undefined;
     }
 };
@@ -148,7 +173,7 @@ pub fn readResponse(gpa: std.mem.Allocator, status: u16, body: []const u8, optio
     // the secret among them, lives in it.
     const capacity = body.len * 3 + 4096;
     var storage = aegis.SecretBytes.init(gpa, capacity) catch return error.OutOfMemory;
-    errdefer storage.deinit();
+    errdefer storage.deinit(gpa);
     // unreachable: the capacity was just allocated at this length
     storage.resizeWithinCapacity(capacity) catch unreachable;
     const bytes = storage.exposeMut();
@@ -159,7 +184,7 @@ pub fn readResponse(gpa: std.mem.Allocator, status: u16, body: []const u8, optio
         .limits = .{ .depth = 16 },
     }) catch return error.InvalidResponse;
     if (wire.client_id.len == 0) return error.InvalidResponse;
-    var r: Registration = .{ .client_id = wire.client_id, .storage = storage };
+    var r: Registration = .{ .client_id = wire.client_id, .storage = storage, .gpa = gpa };
     inline for (@typeInfo(Wire).@"struct".field_names) |name| {
         if (comptime !std.mem.eql(u8, name, "client_id")) @field(r, name) = @field(wire, name);
     }

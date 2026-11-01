@@ -8,6 +8,7 @@
 //! why (RFC 6750 §3, RFC 9449 §7.1) and where this resource's metadata is
 //! (RFC 9728 §5.1).
 const std = @import("std");
+const time = @import("clearance").time;
 const uplink = @import("uplink");
 const clearance = @import("clearance");
 const challenge = @import("../challenge.zig");
@@ -52,6 +53,13 @@ pub const Request = struct {
     /// DPoP proof names.
     method: []const u8 = "GET",
     url: []const u8 = "",
+    /// The TLS client certificate (DER) the connection proved, when it is
+    /// mutual TLS (uplink's `server.Request.peer_certificate`): a token
+    /// bound to a certificate (RFC 8705 §3) must name this one. A resumed
+    /// TLS session proves no certificate (cloak keeps no peer's leaf across
+    /// resumption), so a certificate-bound token over one is refused: the
+    /// client sends it on a full handshake.
+    client_certificate: ?[]const u8 = null,
 };
 
 /// How a resource that takes DPoP-bound tokens checks their proofs.
@@ -59,7 +67,7 @@ pub const Dpop = struct {
     /// The asymmetric algorithms accepted for proofs.
     algorithms: []const Algorithm,
     /// Where proofs' `jti`s are kept for their life (RFC 9449 §11.1).
-    replay: ?clearance.jwt.Replay = null,
+    replay: ?*clearance.jwt.Replay = null,
     max_age: clearance.jwt.Duration = .literal("60s"),
     /// The nonce proofs must carry, when the resource gives them (§9); the
     /// caller rotates it. A proof without it is answered `use_dpop_nonce`
@@ -135,7 +143,12 @@ pub const Verifier = struct {
         if (token.len > limit) return v.refuse(arena, .unauthorized, scheme, .invalid_token, "size", null);
         const now = std.Io.Clock.real.now(io);
 
-        var binding: access_token.Binding = .none;
+        var binding: access_token.Binding = .{};
+        if (request.client_certificate) |der| {
+            var h: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(der, &h, .{});
+            binding.mtls = h;
+        }
         if (scheme == .dpop) {
             const d = v.dpop.?;
             if (request.dpop.len != 1) return v.refuse(arena, .unauthorized, .dpop, .invalid_dpop_proof, "one DPoP proof", null);
@@ -157,7 +170,7 @@ pub const Verifier = struct {
                 error.UseNonce => v.refuse(arena, .unauthorized, .dpop, .use_dpop_nonce, null, null),
                 else => v.refuse(arena, .unauthorized, .dpop, .invalid_dpop_proof, @tagName(diagnostics.check), null),
             };
-            binding = .{ .dpop = proof.thumbprint };
+            binding.dpop = proof.thumbprint;
         }
         const principal = switch (v.source) {
             .keys => |k| try v.checkJwt(io, http, arena, k.set, k.algorithms, token, binding, scheme, now),
@@ -208,7 +221,7 @@ pub const Verifier = struct {
                 .client_id = verified.access.client_id,
                 .scope = verified.access.scope,
                 .expires_at = verified.registered.exp,
-                .jkt = if (binding == .dpop) binding.dpop else null,
+                .jkt = binding.dpop,
             } };
         }
     }
@@ -232,27 +245,20 @@ pub const Verifier = struct {
             },
             .introspected => |i| i,
         };
-        const seconds: i64 = @intCast(@divFloor(now.nanoseconds, std.time.ns_per_s));
+        const seconds: i64 = time.unixSeconds(now);
         const leeway: i64 = v.leeway.raw();
         if (!i.active) return v.refuse(arena, .unauthorized, scheme, .invalid_token, "inactive", null);
-        switch (binding) {
-            .none => if (i.bound) return v.refuse(arena, .unauthorized, scheme, .invalid_token, "bound", null),
-            .dpop => |t| {
-                const jkt = i.jkt orelse return v.refuse(arena, .unauthorized, scheme, .invalid_token, "binding", null);
-                if (!std.mem.eql(u8, &jkt, &t)) return v.refuse(arena, .unauthorized, scheme, .invalid_token, "binding", null);
-            },
-            .mtls => |h| {
-                const x5t = i.x5t_s256 orelse return v.refuse(arena, .unauthorized, scheme, .invalid_token, "binding", null);
-                if (!std.mem.eql(u8, &x5t, &h)) return v.refuse(arena, .unauthorized, scheme, .invalid_token, "binding", null);
-            },
-        }
+        access_token.holds(binding, i.jkt, i.x5t_s256, i.bound and i.jkt == null and i.x5t_s256 == null) catch |err| return v.refuse(arena, .unauthorized, scheme, .invalid_token, switch (err) {
+            error.BoundToken => "bound",
+            error.WrongBinding => "binding",
+        }, null);
         if (i.exp) |exp| if (seconds >= exp +| leeway) return v.refuse(arena, .unauthorized, scheme, .invalid_token, "expired", null);
         if (i.nbf) |nbf| if (seconds +| leeway < nbf) return v.refuse(arena, .unauthorized, scheme, .invalid_token, "not_yet_valid", null);
         if (i.iss) |iss| if (!std.mem.eql(u8, iss, v.issuer)) return v.refuse(arena, .unauthorized, scheme, .invalid_token, "issuer", null);
         // A token must name this resource: one for another would be replayed
         // here (RFC 8707, MCP's audience rule).
         if (!i.hasAudience(v.resource)) return v.refuse(arena, .unauthorized, scheme, .invalid_token, "audience", null);
-        return .{ .allowed = .{ .subject = i.sub, .client_id = i.client_id, .scope = i.scope, .expires_at = i.exp, .jkt = if (binding == .dpop) binding.dpop else null } };
+        return .{ .allowed = .{ .subject = i.sub, .client_id = i.client_id, .scope = i.scope, .expires_at = i.exp, .jkt = binding.dpop } };
     }
 
     /// The refusal: its error in the challenge of the scheme the request

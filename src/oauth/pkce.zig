@@ -20,10 +20,10 @@ pub const Pkce = struct {
 
     /// A fresh verifier of 32 bytes from `io`'s randomness.
     pub fn generate(io: std.Io) Pkce {
-        var verifier: [length]u8 = undefined;
-        defer std.crypto.secureZero(u8, &verifier);
-        random(io, &verifier);
-        return .{ .verifier = .init(verifier), .challenge = challengeOf(&verifier) };
+        var p: Pkce = .{ .verifier = .init(undefined), .challenge = undefined };
+        random(io, p.verifier.exposeMut());
+        p.challenge = challengeOf(p.verifier.expose());
+        return p;
     }
 
     pub fn deinit(p: *Pkce) void {
@@ -44,12 +44,13 @@ pub fn challengeOf(verifier: []const u8) [length]u8 {
 
 /// 32 random bytes as base64url, into `out`: a `state`, a `nonce`, a `jti`.
 pub fn random(io: std.Io, out: *[length]u8) void {
-    var bytes: [32]u8 = undefined;
-    defer std.crypto.secureZero(u8, &bytes);
-    io.random(&bytes);
+    var bytes_owner: aegis.Secret([32]u8) = .init(undefined);
+    defer bytes_owner.deinit();
+    const bytes = bytes_owner.exposeMut();
+    io.random(bytes);
     var w: std.Io.Writer = .fixed(out);
     // unreachable: 32 bytes encode to exactly `length` characters
-    base64url.encode(&w, &bytes) catch unreachable;
+    base64url.encode(&w, bytes) catch unreachable;
 }
 
 /// Whether two values a peer echoes (a `state`, a `nonce`) are the same, in
