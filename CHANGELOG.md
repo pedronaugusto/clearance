@@ -16,6 +16,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `Algorithm` gains `ml_dsa_44`, `ml_dsa_65` and `ml_dsa_87`, `Algorithm.Family` gains `akp`, and `Key.Material` gains `akp`: a switch over any of them needs the case. A key set's AKP keys (RFC 9964) are read where they were left out as unsupported.
 
 - `jwt.Replay` and `oauth.TokenStore` are interfaces a type embeds and finds itself from by `@fieldParentPtr`, where they were a context pointer and a vtable: `MemoryReplay.replay` and `store.Memory.store` are fields (`&set.replay`, `&memory.store`) where they were functions, and a `Replay` or `TokenStore` is taken by pointer (`dpop.Expected.replay`, `logout.Expected.replay`, `bearer` options' `replay`, `flow.fresh`'s `tokens`).
+- Pins cloak main e7c45f4 (its interfaces carry no context pointer, and it links on x86_64 Windows), uplink's car 7f85e60, which takes them, and shakedown 0.6.0.
 - Pins aegis 0.2 (0.2.3), strand 0.15 and cloak 0.23's line: the shared caches (`MemoryReplay`, `store.Memory`, `dpop.Session`, `Introspector`, `RemoteKeySet`) hold their state in aegis `BlockingGuarded` owners, so a field that was guarded by a mutex is reached through the owner.
 
 ### Added
