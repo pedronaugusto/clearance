@@ -147,7 +147,7 @@ pub fn lease(r: *RemoteKeySet, io: std.Io, http: *uplink.Client, want: Want) (Le
             if (!stale and (want == .current or waited)) return take(held.?);
             if (waited) return usableOr(state, now);
             if (state.fetching) {
-                r.fetched.wait(io, &guard, .none) catch |err| switch (err) {
+                guard.wait(&r.fetched, io, .none) catch |err| switch (err) {
                     error.Canceled => |e| return e,
                     // Too many tasks wait already: the set held serves, as when a fetch failed.
                     error.WaiterLimit => return usableOr(guard.value(), now),

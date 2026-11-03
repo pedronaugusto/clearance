@@ -39,6 +39,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - ML-DSA in JOSE (RFC 9964): `ML-DSA-44`, `ML-DSA-65` and `ML-DSA-87` verify and sign, pure ML-DSA with the empty context, on cloak's ML-DSA. AKP keys are read from key sets and public JWKs (`alg` required and one of the three, `pub` exactly its level's length; for signatures only) and written with their thumbprint members `alg`, `kty` and `pub` (RFC 9964 §6); a private AKP JWK is read by its 32-byte seed (`priv`, the one form RFC 9964 defines), the public key derived from it and compared with `pub`, and `Signer.fromJwk` signs with its own `alg`. RFC 9964 Appendix A.1's three examples verify, their `kid`s are their keys' thumbprints, and ML-DSA-44's signature is the deterministic one over its signing input. Bench rows `jwt/sign-ml-dsa-65` and `jwt/verify-ml-dsa-65`.
 - Properties over the certificate and DPoP binding (any `cnf` against any proof passes exactly as RFC 8705 §3 and RFC 9449 §7.1 say) and over request objects (any authorization request verifies and carries its parameters back); bench rows for ES512 signing and verification and a request object written.
 
+### Changed
+
+- aegis 0.3: a remote key set's wait for its fetch is its guard's (`guard.wait(&condition, io, .none)`). Pins aegis breaking-0.3 (7bdb587), and strand, cloak, uplink and shakedown on it.
+
 ## [0.4.0] - 2026-10-21
 
 ### Breaking
