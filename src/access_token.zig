@@ -182,7 +182,7 @@ pub fn hasScopes(scope: ?[]const u8, needed: []const []const u8) bool {
 const testing = std.testing;
 const secret: [32]u8 = @splat(0x68);
 const test_keys = [_]Key{Key.hmac(&secret)};
-const test_now: std.Io.Timestamp = .{ .nanoseconds = 1_700_000_000 * std.time.ns_per_s };
+const test_now: std.Io.Timestamp = aegis.units.Instant(.real, .second, i64).fromRaw(1_700_000_000).toTimestamp();
 const test_expected: Expected = .{ .algorithms = &.{.hs256}, .issuer = "https://as.example", .audience = "https://rs.example/mcp" };
 
 fn check(claims: []const u8, typ: ?[]const u8) anyerror!void {

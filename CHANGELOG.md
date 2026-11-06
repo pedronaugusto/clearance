@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- `dpop.Session.proof` (and `headers`) refuse a target that is no request URI a proof can name as its `htu` (RFC 9449 section 4.2: not an absolute https URL, http to the loopback alone, or one with a fragment) with `error.InvalidTarget`, a new member of `ProofError`, where the proof was signed over it without a nonce. A token request to such an endpoint fails as `InvalidEndpoint`, as its fetch would.
 - `token.Grant` gains `device_code`, and `errors.Code` gains `authorization_pending`, `slow_down`, `expired_token` and `unsupported_token_type` (which was `other`, the bearer check's introspection refusal among them), `invalid_dpop_proof` and `use_dpop_nonce`: a switch over either needs the new cases.
 - `AuthorizationFlow.BeginError` gains `PushRequired`.
 - `oauth.bearer.Verifier.check` takes the request (`bearer.Request`: its `Authorization`, its `DPoP` fields, method and URL) where it took the `Authorization` value; `bearer.bearerToken` is `bearer.credentials`, which reads `DPoP` as well as `Bearer`. `access_token.verify` refuses a bound token as before unless `Expected.binding` names what the request proved. `oauth.token.TokenType` gains `dpop`, `jws.Check` gains `request`, `binding`, `nonce` and `replay`; `jws.SignError` gains `InvalidHeader` and `InvalidPayload`; a header with `crit` naming `b64` is now read (and refused unless `Options.unencoded`), and one with `b64` outside `crit` is `InvalidHeader`; and `fetch.postForm` takes the request's `DPoP` value.

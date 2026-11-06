@@ -12,7 +12,9 @@ const token = @import("token.zig");
 const proofs = clearance.dpop;
 
 /// Why a proof could not be written.
-pub const ProofError = error{ OutOfMemory, SigningFailed, InvalidKey };
+/// `InvalidTarget`: the target is no request URI a proof can name as its `htu` (RFC 9449 section 4.2):
+/// not an absolute https URL (http to this machine's loopback alone), or one with a fragment.
+pub const ProofError = error{ OutOfMemory, SigningFailed, InvalidKey, InvalidTarget };
 
 /// How many servers' nonces a session keeps; the oldest goes first.
 pub const max_origins = 8;
@@ -79,11 +81,12 @@ pub const Session = struct {
     /// gave one.
     pub fn proof(s: *Session, gpa: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, method: []const u8, target: []const u8, access_token: ?[]const u8) ProofError!void {
         var nonce: errors.Text(256) = .{};
-        if (url.originOf(target)) |origin| {
+        const origin = url.originOf(target) catch return error.InvalidTarget;
+        {
             var held = s.origins.acquireUncancelable(io);
             defer held.deinit(io);
             if (held.value().find(origin)) |slot| nonce = slot.nonce;
-        } else |_| {}
+        }
         proofs.writeProof(gpa, io, out, &s.key, .{
             .htm = method,
             .htu = target,
@@ -133,6 +136,19 @@ pub const Headers = struct {
 };
 
 const testing = std.testing;
+
+test "a proof is refused for a target that is no request URI it can name as htu" {
+    const gpa = testing.allocator;
+    var private = try clearance.jwk.PrivateKey.parse(gpa, "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"d\":\"nWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A\",\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}", .{});
+    defer private.deinit();
+    var session: Session = .init(try .fromJwk(&private, null));
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    for ([_][]const u8{ "http://as.example/token", "https://as.example/token#f", "as.example/token" }) |target| {
+        try testing.expectError(error.InvalidTarget, session.proof(gpa, testing.io, &out.writer, "POST", target, null));
+    }
+    try testing.expectEqual(@as(usize, 0), out.written().len);
+}
 
 test "a session keeps each server's nonce and signs proofs the server verifies" {
     const gpa = testing.allocator;

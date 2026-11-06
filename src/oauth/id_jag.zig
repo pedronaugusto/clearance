@@ -270,6 +270,7 @@ fn blank(text: []const u8) bool {
 
 /// Whether `raw` is `resource` alone: the string, or an array of it alone.
 fn soleResource(arena: std.mem.Allocator, raw: strand.json.Raw, resource: []const u8) bool {
+    // glint-ignore: Z026 -- a value that is no string is read as an array below
     if (raw.parse([]const u8, arena, .{})) |one| return std.mem.eql(u8, one, resource) else |_| {}
     const many = raw.parse([]const []const u8, arena, .{}) catch return false;
     return many.len == 1 and std.mem.eql(u8, many[0], resource);
@@ -320,7 +321,7 @@ const testing = std.testing;
 const cloak = @import("cloak");
 
 const now_s: i64 = 1_800_000_000;
-const now: std.Io.Timestamp = .{ .nanoseconds = now_s * std.time.ns_per_s };
+const now: std.Io.Timestamp = aegis.units.Instant(.real, .second, i64).fromRaw(now_s).toTimestamp();
 const asked: Request = .{
     .idp_issuer = "https://idp.example",
     .subject_token = "eyJ.id.token",

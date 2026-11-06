@@ -332,7 +332,7 @@ pub fn readResponse(gpa: std.mem.Allocator, status: u16, body: []const u8, optio
 }
 
 const testing = std.testing;
-const ctx: client_auth.Context = .{ .issuer = "https://as.example", .now = .{ .nanoseconds = 0 } };
+const ctx: client_auth.Context = .{ .issuer = "https://as.example", .now = .zero };
 
 test "each grant's request" {
     var code = try request(testing.allocator, testing.io, .{ .id = "c" }, .{ .authorization_code = .{ .code = "x y", .redirect_uri = "http://127.0.0.1/cb", .code_verifier = "v" } }, .{ .resources = &.{"https://rs.example/mcp"} }, ctx);
@@ -379,7 +379,7 @@ test "a token response is read into a set: expiry from now, Bearer in any case, 
 }
 
 test "a token response that is not one is refused" {
-    const now: ReadOptions = .{ .now = .{ .nanoseconds = 0 } };
+    const now: ReadOptions = .{ .now = .zero };
     try testing.expectError(error.UnsupportedTokenType, readResponse(testing.allocator, 200, "{\"access_token\":\"a\",\"token_type\":\"DPoP\"}", now));
     var bound = try readResponse(testing.allocator, 200, "{\"access_token\":\"a\",\"token_type\":\"dpop\"}", .{ .now = now.now, .dpop = true });
     defer bound.tokens.deinit();

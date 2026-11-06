@@ -47,6 +47,7 @@ fn campaign(comptime file: []const u8) !Outcome {
         const key_json = group.object.get("public") orelse group.object.get("private").?;
         const text = try std.json.Stringify.valueAlloc(a, key_json, .{});
         var parsed = jwk.KeySet.parse(gpa, text, .{ .secrets = true });
+        // glint-ignore: Z026 -- a key set that does not parse has nothing to free; its vectors run against no keys
         defer if (parsed) |*set| set.deinit() else |_| {};
         const keys: []const Key = if (parsed) |*set| set.keys else |_| &.{};
         for (group.object.get("tests").?.array.items) |vector| {

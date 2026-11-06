@@ -125,7 +125,7 @@ pub fn verifyToken(io: std.Io, token: []const u8, keys: []const Key, expected: E
 const testing = std.testing;
 const secret: [32]u8 = @splat(0x4c);
 const test_keys = [_]Key{Key.hmac(&secret)};
-const test_now: std.Io.Timestamp = .{ .nanoseconds = 1_471_566_200 * std.time.ns_per_s };
+const test_now: std.Io.Timestamp = aegis.units.Instant(.real, .second, i64).fromRaw(1_471_566_200).toTimestamp();
 const test_expected: Expected = .{ .algorithms = &.{.hs256}, .issuer = "https://server.example.com", .client_id = "s6BhdRkqt3" };
 
 fn signed(gpa: std.mem.Allocator, typ: ?[]const u8, claims: []const u8) ![]u8 {

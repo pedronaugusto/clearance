@@ -217,7 +217,7 @@ pub fn decryptNested(token: []const u8, decryption: Decryption, scratch: []u8, d
     // Read before the header's strings, which live past the content, are wiped.
     const content_type: ContentType = if (d.header.cty) |cty| (if (mediaTypeIs(cty, "JWT")) .jwt else .other) else .none;
     @memmove(scratch[0..d.plaintext.len], d.plaintext);
-    // aegis: design: the caller's scratch, borrowed: what decryption left past the content is wiped before it is handed back
+    // the caller's scratch, borrowed: what decryption left past the content is wiped before it is handed back
     std.crypto.secureZero(u8, scratch[d.plaintext.len..]);
     return .{ .alg = d.header.alg, .enc = d.header.enc, .content_type = content_type, .content = scratch[0..d.plaintext.len], .rest = scratch[d.plaintext.len..] };
 }
@@ -346,6 +346,7 @@ pub fn numericDate(bytes: []const u8) error{InvalidClaims}!i64 {
     const text = std.mem.trim(u8, bytes, " \t\r\n");
     if (text.len == 0 or text.len > 32) return error.InvalidClaims;
     if (text[0] != '-' and !std.ascii.isDigit(text[0])) return error.InvalidClaims;
+    // glint-ignore: Z026 -- a value that is no integer is read as a JSON number below
     if (std.fmt.parseInt(i64, text, 10)) |seconds| {
         return seconds;
     } else |_| {}

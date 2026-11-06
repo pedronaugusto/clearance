@@ -517,6 +517,7 @@ fn recoverKey(io: std.Io, arena: std.mem.Allocator, key: *const DecryptionKey, a
             var plain_owner: aegis.Secret([cloak.PrivateKey.max_plaintext]u8) = .init(undefined);
             defer plain_owner.deinit();
             const plain = plain_owner.exposeMut();
+            // glint-ignore: Z026 -- a key that does not decrypt leaves the random content key, so a wrong key and a bad tag answer alike (RFC 7516 section 11.5)
             if (private.decrypt(alg.oaep().?, encrypted_key, noise[0..noise_length], plain)) |content_key| {
                 if (content_key.len == cek.len) {
                     @memcpy(cek, content_key);

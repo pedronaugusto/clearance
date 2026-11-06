@@ -35,6 +35,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "clearance", .module = clearance },
         },
     });
+    // glint-ignore: Z026 -- a lazy dependency not fetched yet adds no imports: the build fetches it and runs again
     if (b.dependencyLazy("uplink", .{ .target = target, .optimize = optimize })) |uplink| {
         oauth.addImport("uplink.wire", uplink.module("uplink.wire"));
         oauth.addImport("uplink", uplink.module("uplink"));

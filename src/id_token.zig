@@ -192,7 +192,7 @@ pub fn accessTokenHash(alg: Algorithm, value: []const u8, out: *[43]u8) []const 
 const testing = std.testing;
 const secret: [32]u8 = @splat(0x24);
 const test_keys = [_]Key{Key.hmac(&secret)};
-const test_now: std.Io.Timestamp = .{ .nanoseconds = 1_700_000_000 * std.time.ns_per_s };
+const test_now: std.Io.Timestamp = aegis.units.Instant(.real, .second, i64).fromRaw(1_700_000_000).toTimestamp();
 const test_expected: Expected = .{ .algorithms = &.{.hs256}, .issuer = "https://op.example", .client_id = "app", .nonce = "n-0S6_WzA2Mj" };
 
 fn idToken(out: *std.Io.Writer.Allocating, claims: []const u8, typ: ?[]const u8) !void {

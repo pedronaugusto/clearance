@@ -170,6 +170,7 @@ fn anyLogoutRequest(_: void, c: *shake.Case) !void {
     var buffer: [256]u8 = undefined;
     var scratch: [256]u8 = undefined;
     const input = shake.gen.mutated(c.source, &buffer, &.{ "logout_token=eyJ.a.b", "iss=https%3A%2F%2Fserver.example.com&sid=08a5019c" });
+    // glint-ignore: Z026 -- a mutated request may carry no token; the property checks only one that does
     if (oauth.logout.readBackChannel(input, &scratch)) |token| {
         if (token.len == 0) return error.EmptyToken;
     } else |_| {}

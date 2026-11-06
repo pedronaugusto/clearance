@@ -107,7 +107,11 @@ fn postProved(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, endpoint
         defer request.deinit();
         var proof: std.Io.Writer.Allocating = .init(gpa);
         defer proof.deinit();
-        if (options.dpop) |session| try session.proof(gpa, io, &proof.writer, "POST", endpoint, null);
+        // A target no proof can name is one fetch refuses too, as InvalidEndpoint.
+        if (options.dpop) |session| session.proof(gpa, io, &proof.writer, "POST", endpoint, null) catch |err| return switch (err) {
+            error.InvalidTarget => error.InvalidEndpoint,
+            else => |e| e,
+        };
         var answer = try fetch.postForm(gpa, io, http, endpoint, &request, if (options.dpop != null) proof.written() else null, options.max_bytes, options.fetch);
         const session = options.dpop orelse return .{ .answer = answer, .at = now };
         if (answer.dpop_nonce) |*n| session.remember(io, endpoint, n.slice());
@@ -525,7 +529,7 @@ pub const DeviceFlow = struct {
             const seconds: i64 = time.unixSeconds(now);
             // A request after the codes expired would only be refused.
             if (seconds +| @as(i64, flow.authorization.interval) >= flow.authorization.expires_at) return error.Expired;
-            try io.sleep(.fromSeconds(flow.authorization.interval), .awake);
+            try io.sleep(aegis.units.Duration(.second, u32).fromRaw(flow.authorization.interval).toIoDuration(), .awake);
             switch (try flow.poll(gpa, io, http, server, client, options)) {
                 .tokens => |t| return .{ .tokens = t },
                 .refused => |e| return .{ .refused = e },

@@ -307,7 +307,7 @@ const testing = std.testing;
 
 /// RFC 8037 A.1's Ed25519 key.
 const test_private_jwk = "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"d\":\"nWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A\",\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}";
-const test_now: std.Io.Timestamp = .{ .nanoseconds = 1_800_000_000 * std.time.ns_per_s };
+const test_now: std.Io.Timestamp = aegis.units.Instant(.real, .second, i64).fromRaw(1_800_000_000).toTimestamp();
 
 fn testProof(gpa: std.mem.Allocator, key: *const Key, proof: Proof, now: std.Io.Timestamp) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(gpa);
