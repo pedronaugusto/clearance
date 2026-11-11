@@ -31,6 +31,12 @@ verifies and signs tokens takes `clearance` and fetches no uplink; one that
 speaks OAuth asks for it, `b.dependency("clearance", .{ .oauth = true })`, and
 takes `clearance.oauth` too (uplink is fetched then).
 
+## Stability
+
+clearance is 0.x and tracks Zig 0.17.x. A breaking change comes only in a minor release
+(0.4 to 0.5), with a CHANGELOG entry saying what changed and what to write instead; a
+patch release never breaks.
+
 ## Usage
 
 A resource server checks an access token against the keys its authorization
