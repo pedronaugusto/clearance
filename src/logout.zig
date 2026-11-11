@@ -51,7 +51,7 @@ pub const VerifyError = jwt.VerifyError || error{
     Replayed,
     /// The replay set has no room: refused rather than forgotten.
     ReplayFull,
-};
+} || std.Io.Cancelable;
 
 const WireClaims = struct {
     sid: ?[]const u8 = null,
@@ -110,9 +110,12 @@ pub fn verifyToken(io: std.Io, token: []const u8, keys: []const Key, expected: E
     if (expected.replay) |replay| {
         const seconds: i64 = time.unixSeconds(now);
         const leeway: i64 = expected.leeway.raw();
-        const fresh = replay.record(io, jwt.replayId(expected.issuer, jti), exp +| leeway +| 1, seconds) catch {
-            diagnostics.check = .replay;
-            return error.ReplayFull;
+        const fresh = replay.record(io, jwt.replayId(expected.issuer, jti), exp +| leeway +| 1, seconds) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            error.Full => {
+                diagnostics.check = .replay;
+                return error.ReplayFull;
+            },
         };
         if (!fresh) {
             diagnostics.check = .replay;
@@ -157,6 +160,25 @@ test "§2.4's logout token is verified once: its user and session named" {
         defer gpa.free(other);
         _ = try verifyToken(testing.io, other, &test_keys, test_expected, test_now, &scratch);
     }
+}
+
+/// A replay set kept somewhere a wait can be canceled: every record is.
+const CanceledReplay = struct {
+    replay: jwt.Replay = .{ .recordFn = record },
+    fn record(_: *jwt.Replay, _: std.Io, _: [32]u8, _: i64, _: i64) jwt.Replay.RecordError!bool {
+        return error.Canceled;
+    }
+};
+
+test "a replay set's cancel is the verification's cancel, not a full set" {
+    const gpa = testing.allocator;
+    const token = try signed(gpa, media_type, example);
+    defer gpa.free(token);
+    var replay: CanceledReplay = .{};
+    var expected = test_expected;
+    expected.replay = &replay.replay;
+    var scratch: [2048]u8 = undefined;
+    try testing.expectError(error.Canceled, verifyToken(testing.io, token, &test_keys, expected, test_now, &scratch));
 }
 
 test "a token that is not a logout token, or not for this client, is refused" {

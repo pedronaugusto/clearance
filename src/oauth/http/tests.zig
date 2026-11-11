@@ -701,7 +701,7 @@ test "revocation: the refresh token revoked, then the store forgets it; a refusa
     try tokens.save(io, "srv", &set);
     // A sign-out: the grant ended at the server, then forgotten here.
     try testing.expectEqual(oauth.revocation.Response.revoked, try oauth.revoke(gpa, io, &http, &server.value, app, set.refresh_token.?, .refresh_token, .{}));
-    tokens.forget(io, "srv");
+    try tokens.forget(io, "srv");
     try testing.expectEqualStrings("rt1", p.revoked);
     try testing.expectEqual(@as(?oauth.TokenSet, null), try tokens.load(io, gpa, "srv"));
 

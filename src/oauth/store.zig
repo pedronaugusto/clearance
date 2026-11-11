@@ -29,7 +29,7 @@ pub const SaveError = error{
 pub const TokenStore = struct {
     loadFn: *const fn (s: *TokenStore, io: std.Io, gpa: std.mem.Allocator, key: []const u8) LoadError!?TokenSet,
     saveFn: *const fn (s: *TokenStore, io: std.Io, key: []const u8, set: *const TokenSet) SaveError!void,
-    forgetFn: *const fn (s: *TokenStore, io: std.Io, key: []const u8) void,
+    forgetFn: *const fn (s: *TokenStore, io: std.Io, key: []const u8) std.Io.Cancelable!void,
 
     /// The set kept under `key`, a copy the caller owns, or null.
     pub fn load(s: *TokenStore, io: std.Io, gpa: std.mem.Allocator, key: []const u8) LoadError!?TokenSet {
@@ -43,8 +43,8 @@ pub const TokenStore = struct {
 
     /// Drops what is kept under `key`: a sign-out, or a refresh token the
     /// server refused.
-    pub fn forget(s: *TokenStore, io: std.Io, key: []const u8) void {
-        s.forgetFn(s, io, key);
+    pub fn forget(s: *TokenStore, io: std.Io, key: []const u8) std.Io.Cancelable!void {
+        return s.forgetFn(s, io, key);
     }
 };
 
@@ -101,7 +101,7 @@ pub const Memory = struct {
         entry.value_ptr.* = copy;
     }
 
-    fn forget(s: *TokenStore, io: std.Io, key: []const u8) void {
+    fn forget(s: *TokenStore, io: std.Io, key: []const u8) std.Io.Cancelable!void {
         const m: *Memory = @fieldParentPtr("store", s);
         var held = m.sets.acquireUncancelable(io);
         defer held.deinit(io);
@@ -136,7 +136,24 @@ test "a memory store keeps copies by key, replaces them, and forgets them" {
     try std.testing.expectEqualStrings("a2", replaced.access_token);
     try std.testing.expectEqual(@as(?[]const u8, null), replaced.refresh_token);
     replaced.deinit();
-    s.forget(io, "https://rs.example/mcp");
-    s.forget(io, "never kept");
+    try s.forget(io, "https://rs.example/mcp");
+    try s.forget(io, "never kept");
     try std.testing.expectEqual(@as(?TokenSet, null), try s.load(io, gpa, "https://rs.example/mcp"));
+}
+
+/// A store kept somewhere a wait can be canceled: forgetting is.
+const CanceledStore = struct {
+    store: TokenStore = .{ .loadFn = load, .saveFn = save, .forgetFn = forget },
+    fn load(_: *TokenStore, _: std.Io, _: std.mem.Allocator, _: []const u8) LoadError!?TokenSet {
+        return null;
+    }
+    fn save(_: *TokenStore, _: std.Io, _: []const u8, _: *const TokenSet) SaveError!void {}
+    fn forget(_: *TokenStore, _: std.Io, _: []const u8) std.Io.Cancelable!void {
+        return error.Canceled;
+    }
+};
+
+test "a store's forget can say it was canceled" {
+    var canceled: CanceledStore = .{};
+    try std.testing.expectError(error.Canceled, canceled.store.forget(std.testing.io, "https://rs.example/mcp"));
 }

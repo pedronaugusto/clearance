@@ -151,7 +151,7 @@ pub const VerifyError = jws.VerifyError || error{
     Replayed,
     /// The replay set has no room: refused rather than forgotten.
     ReplayFull,
-};
+} || std.Io.Cancelable;
 
 const WireClaims = struct {
     jti: ?[]const u8 = null,
@@ -248,7 +248,10 @@ fn verifyChecked(io: std.Io, proof: []const u8, expected: Expected, now: std.Io.
     }
     out.thumbprint = jwk.thumbprint(out.key);
     if (expected.replay) |replay| {
-        const fresh = replay.record(io, jwt.replayId(&out.thumbprint, jti), iat +| max_age +| leeway +| 1, seconds) catch return error.ReplayFull;
+        const fresh = replay.record(io, jwt.replayId(&out.thumbprint, jti), iat +| max_age +| leeway +| 1, seconds) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            error.Full => return error.ReplayFull,
+        };
         if (!fresh) return error.Replayed;
     }
     out.jti = jti;

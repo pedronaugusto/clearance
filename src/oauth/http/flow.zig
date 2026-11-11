@@ -685,7 +685,7 @@ pub fn fresh(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, tokens: *
         // Still usable for the margin's rest; spent once past its expiry.
         if (!set.expiresWithin(now, .literal("0s"))) return set;
         set.deinit();
-        tokens.forget(io, key);
+        try tokens.forget(io, key);
         return null;
     }
     const response = refresh(gpa, io, http, server, client, &set, options.token);
@@ -693,7 +693,7 @@ pub fn fresh(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, tokens: *
     switch (try response) {
         .refused => |e| {
             if (e.code != .invalid_grant) return error.RefreshRefused;
-            tokens.forget(io, key);
+            try tokens.forget(io, key);
             return null;
         },
         .tokens => |renewed| {

@@ -405,11 +405,11 @@ fn strip(media: []const u8) []const u8 {
 pub const Replay = struct {
     recordFn: *const fn (r: *Replay, io: std.Io, id: [32]u8, until: i64, now: i64) RecordError!bool,
 
-    pub const RecordError = error{
-        /// Every place is held by an identifier still in its life: refusing
-        /// is the only safe answer (forgetting one would let it be replayed).
-        Full,
-    };
+    /// `Full`: every place is held by an identifier still in its life, and
+    /// refusing is the only safe answer (forgetting one would let it be
+    /// replayed). `Canceled`: a set kept on a disk or over the network was
+    /// waiting when the task was canceled.
+    pub const RecordError = error{Full} || std.Io.Cancelable;
 
     /// Records `id` as seen until `until` (seconds since the epoch): true
     /// the first time, false when it is already held and `now` is before
