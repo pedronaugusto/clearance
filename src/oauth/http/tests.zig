@@ -1056,6 +1056,37 @@ test "introspection answers are kept until the bound, by the token's hash" {
     try testing.expectEqual(@as(u32, 3), p.introspections);
 }
 
+/// Leases the key set once and lets it go.
+fn leaseOnce(k: *oauth.RemoteKeySet, i: Io, h: *uplink.Client) (oauth.RemoteKeySet.LeaseError || Io.Cancelable)!void {
+    var l = try k.lease(i, h, .current);
+    l.release();
+}
+
+test "a fetch whose task is canceled is no fetch's outcome: a task waiting on it fetches the set itself" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var p: Provider = undefined;
+    try p.start(io);
+    defer p.stop(io);
+    var http: uplink.Client = .init(gpa, .{});
+    defer http.deinit(io);
+    var buffer: [128]u8 = undefined;
+    var keys = try oauth.RemoteKeySet.init(gpa, p.url(&buffer, "/jwks"), .{});
+    defer keys.deinit();
+    p.jwks_delay_ms = 300;
+    // The first task fetches; the second waits on its fetch.
+    var fetching = io.concurrent(leaseOnce, .{ &keys, io, &http }) catch return error.SkipZigTest;
+    try io.sleep(.fromMilliseconds(60), .awake);
+    var waiting = io.concurrent(leaseOnce, .{ &keys, io, &http }) catch {
+        _ = fetching.cancel(io) catch {}; // glint-ignore: Z026 -- the test is skipped; the first task only has to end
+        return error.SkipZigTest;
+    };
+    try io.sleep(.fromMilliseconds(60), .awake);
+    try testing.expectError(error.Canceled, fetching.cancel(io));
+    // The waiter takes no stale set and no error from the canceled fetch: it fetches.
+    try waiting.await(io);
+}
+
 test "a resource server's bearer check: JWT access tokens with the key set, or introspection; 401 and 403 answers" {
     const gpa = testing.allocator;
     const io = testing.io;

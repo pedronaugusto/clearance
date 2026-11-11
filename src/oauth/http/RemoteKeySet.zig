@@ -104,6 +104,10 @@ const State = struct {
     last_attempt: ?i64 = null,
     /// Why the last fetch failed, null after a success.
     last_error: ?FetchError = null,
+    /// Fetches that ended with an outcome, a set or a failure, counted. A fetch
+    /// whose task was canceled says nothing of the key server and is not one:
+    /// a task that waited on it sees this unchanged, and fetches or waits again.
+    outcomes: u64 = 0,
 };
 
 /// A key set for `uri`, an HTTPS URL (or HTTP to loopback), fetched when
@@ -147,13 +151,16 @@ pub fn lease(r: *RemoteKeySet, io: std.Io, http: *uplink.Client, want: Want) (Le
             if (!stale and (want == .current or waited)) return take(held.?);
             if (waited) return usableOr(state, now);
             if (state.fetching) {
+                const before = state.outcomes;
                 guard.wait(&r.fetched, io, .none) catch |err| switch (err) {
                     error.Canceled => |e| return e,
                     // Too many tasks wait already: the set held serves, as when a fetch failed.
                     error.WaiterLimit => return usableOr(guard.value(), now),
                     error.Timeout => unreachable, // unreachable: the wait has no timeout
                 };
-                waited = true;
+                // Woken by a fetch that ended with an outcome; by a canceled one, not:
+                // then another task fetches, or this one does, on the next pass.
+                waited = guard.value().outcomes != before;
                 continue;
             }
             const cooling = if (state.last_attempt) |at| now - at < @as(i64, r.options.cooldown.raw()) else false;
@@ -172,13 +179,17 @@ pub fn lease(r: *RemoteKeySet, io: std.Io, http: *uplink.Client, want: Want) (Le
             if (after.current) |old| old.unref();
             after.current = snapshot;
             after.last_error = null;
+            after.outcomes +%= 1;
         } else |err| switch (err) {
             // A canceled fetch says nothing of the key server.
             error.Canceled => {
                 after.last_attempt = previous_attempt;
                 return error.Canceled;
             },
-            else => |e| after.last_error = e,
+            else => |e| {
+                after.last_error = e;
+                after.outcomes +%= 1;
+            },
         }
         waited = true;
     }
