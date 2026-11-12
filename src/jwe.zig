@@ -711,7 +711,7 @@ pub const EncryptError = error{
     /// The system's secure random source failed while drawing an ECDH-ES
     /// ephemeral key.
     EntropyUnavailable,
-} || Writer.Error || std.mem.Allocator.Error;
+} || Writer.Error || std.mem.Allocator.Error || std.Io.Cancelable;
 
 /// What one recipient's key management wrote: its encrypted key, and the
 /// header members it adds (base64url text).
@@ -778,6 +778,8 @@ const Draw = struct {
         }) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.EntropyUnavailable => error.EntropyUnavailable,
+            // A cancel that lands while the key is drawn is the caller's.
+            error.Canceled => error.Canceled,
             // unreachable: only RSA's search can run out
             error.GenerationFailed => unreachable,
         };

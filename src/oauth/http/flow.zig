@@ -319,6 +319,7 @@ pub const AuthorizationFlow = struct {
                     error.InvalidKey => error.InvalidKey,
                     error.SigningFailed => error.SigningFailed,
                     error.EntropyUnavailable => error.EntropyUnavailable,
+                    error.Canceled => error.Canceled,
                 };
                 return par.requestObject(g, i, b.client, object.written(), .{ .issuer = b.issuer, .now = now });
             }

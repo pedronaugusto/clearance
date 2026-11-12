@@ -44,7 +44,7 @@ pub const Error = error{
     /// The system's secure random source failed while drawing the
     /// encryption's ephemeral key (ECDH-ES).
     EntropyUnavailable,
-} || std.mem.Allocator.Error;
+} || std.mem.Allocator.Error || std.Io.Cancelable;
 
 /// Writes the request object of `request` for the server `issuer`: every
 /// authorization parameter as a claim (`resource` as an array when there
@@ -64,6 +64,7 @@ pub fn write(gpa: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, issuer: []
         error.OutOfMemory, error.WriteFailed => error.OutOfMemory,
         error.InvalidKey, error.InvalidRecipients => error.InvalidKey,
         error.EntropyUnavailable => error.EntropyUnavailable,
+        error.Canceled => error.Canceled,
     };
 }
 

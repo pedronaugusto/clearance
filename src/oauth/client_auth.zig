@@ -127,7 +127,7 @@ pub const Error = error{
     /// The system's secure random source failed while drawing an ephemeral
     /// key (an encrypted request object's ECDH-ES).
     EntropyUnavailable,
-} || std.mem.Allocator.Error;
+} || std.mem.Allocator.Error || std.Io.Cancelable;
 
 /// The form request of `pairs` from `client`: its credentials added as its
 /// method says. `io` draws an assertion's `jti` and its signature's noise.
