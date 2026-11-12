@@ -45,6 +45,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Pins aegis c8982a8, still 0.2.4: six additive commits after 3c0b13e (the role declarations a linter reads, `lint_rules`), the aegis the development build's preflight selects. Nothing clearance calls changed.
 - aegis 0.3: a remote key set's wait for its fetch is its guard's (`guard.wait(&condition, io, .none)`). Pins aegis breaking-0.3 (a34e694), and on it strand (cc6918d), cloak (5103da0), uplink main (a051420) and shakedown main (4979fa9), the commits relic main pins.
 
 ## [0.4.0] - 2026-10-21
