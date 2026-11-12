@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- Pins uplink 0.8.8, which refuses a tab in a URL and percent-encodes a target's bytes past ASCII: before it, a URL from a server's JSON (an authorization server's or protected resource's metadata endpoints) could put a tab onto the request line uplink sent. See uplink's advisory. Nothing else changes.
+
 ## [0.4.0] - 2026-10-21
 
 ### Breaking
