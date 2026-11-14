@@ -374,3 +374,65 @@ fn anyBinding(_: void, c: *shake.Case) !void {
 test "any token binding passes exactly when every confirmation it names is the one the request proved" {
     try shake.check(std.testing.allocator, {}, anyBinding, .{ .cases = 1000 });
 }
+
+/// The verifier picks the key (README, Design): a token's algorithm must be
+/// one the verifier names; the header's `kid` chooses among the keys that
+/// carry it, a key with an `alg` serving that algorithm alone; without a
+/// `kid` the token verifies only when exactly one key fits. Held to that
+/// model over keys of any kids and algorithms and tokens signed by any of
+/// them.
+fn keyChoice(_: void, c: *shake.Case) !void {
+    const s = c.source;
+    const kids = [_]?[]const u8{ null, "a", "b" };
+    const hmacs = [_]Algorithm{ .hs256, .hs384 };
+    var secrets: [4][64]u8 = undefined;
+    var keys: [4]Key = undefined;
+    const n = shake.gen.intRange(s, usize, 1, keys.len);
+    for (keys[0..n], secrets[0..n], 0..) |*key, *secret, i| {
+        // Distinct secrets: a key verifies only what it signed.
+        secret.* = @splat(@intCast(i + 1));
+        key.* = Key.hmac(secret);
+        key.kid = kids[shake.gen.intRange(s, usize, 0, kids.len - 1)];
+        key.alg = if (shake.gen.boolean(s)) hmacs[shake.gen.intRange(s, usize, 0, 1)] else null;
+    }
+    const signer = shake.gen.intRange(s, usize, 0, n - 1);
+    const alg = hmacs[shake.gen.intRange(s, usize, 0, 1)];
+    const header_kid = ([_]?[]const u8{ null, "a", "b", "c" })[shake.gen.intRange(s, usize, 0, 3)];
+    var allowed_buffer: [2]Algorithm = undefined;
+    var allowed_len: usize = 0;
+    for (hmacs) |h| if (shake.gen.boolean(s)) {
+        allowed_buffer[allowed_len] = h;
+        allowed_len += 1;
+    };
+    if (allowed_len == 0) return;
+    const allowed = allowed_buffer[0..allowed_len];
+
+    var token: std.Io.Writer.Allocating = .init(c.gpa);
+    defer token.deinit();
+    try jws.sign(c.gpa, std.testing.io, &token.writer, .{ .kid = header_kid }, "payload", .{ .hmac = .{ .alg = alg, .secret = &secrets[signer] } });
+
+    // The model.
+    const named = std.mem.findScalar(Algorithm, allowed, alg) != null;
+    var candidates: usize = 0;
+    var chosen: usize = undefined;
+    for (keys[0..n], 0..) |key, i| {
+        if (key.alg) |own| if (own != alg) continue;
+        if (header_kid) |kid| {
+            const own = key.kid orelse continue;
+            if (!std.mem.eql(u8, own, kid)) continue;
+        }
+        candidates += 1;
+        chosen = i;
+    }
+    const verifies = named and candidates == 1 and chosen == signer;
+
+    var scratch: [jws.scratchLength(512)]u8 = undefined;
+    if (jws.verify(token.written(), keys[0..n], .{ .algorithms = allowed }, &scratch)) |verified| {
+        if (!verifies) return error.VerifiedAgainstTheModel;
+        if (verified.key != &keys[signer]) return error.WrongKeyChosen;
+    } else |_| if (verifies) return error.RefusedAgainstTheModel;
+}
+
+test "the verifier picks the key: the header's kid among the keys that fit, or the one key that fits" {
+    try shake.check(std.testing.allocator, {}, keyChoice, .{ .cases = 2000 });
+}
