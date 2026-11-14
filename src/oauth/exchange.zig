@@ -118,7 +118,7 @@ pub fn readResponse(gpa: std.mem.Allocator, status: u16, body: []const u8, optio
     if (wire.access_token.len == 0 or wire.issued_token_type.len == 0 or wire.token_type.len == 0) return error.InvalidResponse;
     const total = wire.access_token.len + wire.issued_token_type.len + wire.token_type.len + if (wire.scope) |s| s.len else 0;
     var storage = aegis.SecretBytes.init(gpa, total) catch return error.OutOfMemory;
-    // unreachable: the capacity was just allocated at this length
+    // glint-ignore: Z026 -- the capacity was just allocated at this length
     storage.resizeWithinCapacity(total) catch unreachable;
     const bytes = storage.exposeMut();
     var at: usize = 0;

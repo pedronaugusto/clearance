@@ -188,7 +188,7 @@ const test_expected: Expected = .{ .algorithms = &.{.hs256}, .issuer = "https://
 fn check(claims: []const u8, typ: ?[]const u8) anyerror!void {
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
-    jws.sign(testing.allocator, testing.io, &out.writer, .{ .typ = typ }, claims, .{ .hmac = .{ .alg = .hs256, .secret = &secret } }) catch unreachable; // unreachable: signing with a fixed secret
+    jws.sign(testing.allocator, testing.io, &out.writer, .{ .typ = typ }, claims, .{ .hmac = .{ .alg = .hs256, .secret = &secret } }) catch unreachable; // glint-ignore: Z026 -- signing with a fixed secret
     var scratch: [4096]u8 = undefined;
     const v = try verify(void, out.written(), &test_keys, test_expected, test_now, &scratch);
     try testing.expectEqualStrings("app", v.access.client_id);
@@ -211,7 +211,7 @@ test "RFC 9068 4: an access token passes, typed, for this resource, its claims p
 fn checkBound(claims: []const u8, binding: Binding) anyerror!void {
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
-    jws.sign(testing.allocator, testing.io, &out.writer, .{ .typ = "at+jwt" }, claims, .{ .hmac = .{ .alg = .hs256, .secret = &secret } }) catch unreachable; // unreachable: signing with a fixed secret
+    jws.sign(testing.allocator, testing.io, &out.writer, .{ .typ = "at+jwt" }, claims, .{ .hmac = .{ .alg = .hs256, .secret = &secret } }) catch unreachable; // glint-ignore: Z026 -- signing with a fixed secret
     var scratch: [4096]u8 = undefined;
     var expected = test_expected;
     expected.binding = binding;

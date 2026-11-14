@@ -68,7 +68,7 @@ const Provider = struct {
 
     fn stop(p: *Provider, io: Io) void {
         p.http.shutdown(io);
-        // glint-ignore: Z026 -- serve ends with the shutdown; its result is not what the test checks
+        // serve ends with the shutdown; its result is not what the test checks
         p.serving.await(io) catch {};
         p.http.deinit(io);
         p.listener.deinit(io);
@@ -1078,7 +1078,7 @@ test "a fetch whose task is canceled is no fetch's outcome: a task waiting on it
     var fetching = io.concurrent(leaseOnce, .{ &keys, io, &http }) catch return error.SkipZigTest;
     try io.sleep(.fromMilliseconds(60), .awake);
     var waiting = io.concurrent(leaseOnce, .{ &keys, io, &http }) catch {
-        _ = fetching.cancel(io) catch {}; // glint-ignore: Z026 -- the test is skipped; the first task only has to end
+        _ = fetching.cancel(io) catch {}; // the test is skipped; the first task only has to end
         return error.SkipZigTest;
     };
     try io.sleep(.fromMilliseconds(60), .awake);

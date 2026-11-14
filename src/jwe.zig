@@ -239,8 +239,8 @@ const Shared = struct {
 /// random content key a failed recovery goes on with. Strings and the
 /// plaintext live in `scratch` (`scratchLength(token.len)` bytes).
 pub fn decrypt(io: std.Io, token: []const u8, keys: []const DecryptionKey, options: Options, scratch: []u8) DecryptError!Decrypted {
-    std.debug.assert(options.key_algorithms.len > 0);
-    std.debug.assert(options.encryptions.len > 0);
+    aegis.assert.invariant(options.key_algorithms.len > 0, "options.key_algorithms.len > 0");
+    aegis.assert.invariant(options.encryptions.len > 0, "options.encryptions.len > 0");
     var diagnostics: Diagnostics = .{};
     defer if (options.diagnostics) |d| {
         d.* = diagnostics;
@@ -631,7 +631,7 @@ fn pbes2Key(arena: std.mem.Allocator, alg: KeyManagement, password: []const u8, 
         .pbes2_hs256_a128kw => std.crypto.pwhash.pbkdf2(out, password, salt, count, std.crypto.auth.hmac.sha2.HmacSha256),
         else => std.crypto.pwhash.pbkdf2(out, password, salt, count, std.crypto.auth.hmac.sha2.HmacSha512),
     };
-    // unreachable: the count is at least one and the key at most 32 bytes
+    // glint-ignore: Z026 -- the count is at least one and the key at most 32 bytes
     derived catch unreachable;
 }
 
@@ -952,7 +952,7 @@ fn wrapKey(gpa: std.mem.Allocator, arena: std.mem.Allocator, draw: Draw, r: Reci
         .direct => {},
         .wrap => {
             out.encrypted_key = try arena.alloc(u8, cek.len + 8);
-            // unreachable: a KW secret is 16 or 32 bytes (fitsEncryption) and a content key 16 to 64
+            // glint-ignore: Z026 -- a KW secret is 16 or 32 bytes (fitsEncryption) and a content key 16 to 64
             cloak.cipher.keyWrap.wrap(r.key.key.material.hmac, cek, out.encrypted_key) catch unreachable;
         },
         .gcm_wrap => {
@@ -992,7 +992,7 @@ fn wrapKey(gpa: std.mem.Allocator, arena: std.mem.Allocator, draw: Draw, r: Reci
                 else => unreachable,
             };
             out.encrypted_key = try arena.alloc(u8, cek.len + 8);
-            // unreachable: the KEK is 16 or 32 bytes and the content key 16 to 64
+            // glint-ignore: Z026 -- the KEK is 16 or 32 bytes and the content key 16 to 64
             cloak.cipher.keyWrap.wrap(kek[0..kek_length], cek, out.encrypted_key) catch unreachable;
             out.p2s = try encodeAlloc(arena, salt[0..p.salt_length]);
             out.p2c = p.count;
@@ -1021,7 +1021,7 @@ fn agreeTo(gpa: std.mem.Allocator, arena: std.mem.Allocator, draw: Draw, r: Reci
     var ephemeral = try draw.ephemeral(gpa, curve);
     defer ephemeral.deinit();
     var info: [cloak.PrivateKey.max_public_key_info]u8 = undefined;
-    // unreachable: cloak reads back the key info it writes
+    // glint-ignore: Z026 -- cloak reads back the key info it writes
     const public = cloak.certificates.certificate.parsePublicKey(ephemeral.publicKeyInfo(&info)) catch unreachable;
     const epk: Key = .{
         .material = switch (public) {
@@ -1050,7 +1050,7 @@ fn agreeTo(gpa: std.mem.Allocator, arena: std.mem.Allocator, draw: Draw, r: Reci
     const kek_length = r.alg.wrapLength().?;
     concatKdf(z, r.alg.name(), "", "", kek[0..kek_length]);
     out.encrypted_key = try arena.alloc(u8, cek.len + 8);
-    // unreachable: the KEK is 16 or 32 bytes and the content key 16 to 64
+    // glint-ignore: Z026 -- the KEK is 16 or 32 bytes and the content key 16 to 64
     cloak.cipher.keyWrap.wrap(kek[0..kek_length], cek, out.encrypted_key) catch unreachable;
 }
 

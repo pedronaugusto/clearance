@@ -112,7 +112,7 @@ pub const Session = struct {
         try s.proof(gpa, io, &out.writer, method, target, set.access_token);
         const prefix = "DPoP ";
         var authorization = aegis.SecretBytes.init(gpa, prefix.len + set.access_token.len) catch return error.OutOfMemory;
-        // unreachable: the capacity was just allocated at this length
+        // glint-ignore: Z026 -- the capacity was just allocated at this length
         authorization.resizeWithinCapacity(prefix.len + set.access_token.len) catch unreachable;
         @memcpy(authorization.exposeMut()[0..prefix.len], prefix);
         @memcpy(authorization.exposeMut()[prefix.len..], set.access_token);

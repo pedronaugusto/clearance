@@ -139,7 +139,7 @@ pub const KeySet = struct {
         errdefer set.deinit();
         const arena = set.arena.allocator();
         // The keys outlive the caller's document: strings read from it borrow the copy.
-        // unreachable: the copy is a fresh allocation of the document's length
+        // glint-ignore: Z026 -- the copy is a fresh allocation of the document's length
         set.document.replace(document) catch unreachable;
         const json = set.document.expose();
         const parse_options: strand.json.ParseOptions = .{ .ignore_unknown_fields = true, .limits = .{ .depth = 16 } };
@@ -179,7 +179,7 @@ pub const KeySet = struct {
         };
         if (options.secrets and secret_length > 0) {
             set.secrets = try aegis.SecretBytes.init(gpa, secret_length);
-            // unreachable: the length is the capacity just allocated
+            // glint-ignore: Z026 -- the length is the capacity just allocated
             set.secrets.?.resizeWithinCapacity(secret_length) catch unreachable;
         }
         var secrets: Secrets = .{ .storage = if (set.secrets) |*s| s.exposeMut() else &.{} };
@@ -278,7 +278,7 @@ pub const PrivateKey = struct {
         if (document.len > limit) return error.TooLarge;
         var text = try aegis.SecretBytes.init(gpa, document.len);
         defer text.deinit(gpa);
-        // unreachable: a fresh allocation of the document's length
+        // glint-ignore: Z026 -- a fresh allocation of the document's length
         text.replace(document) catch unreachable;
         var arena: std.heap.ArenaAllocator = .init(gpa);
         errdefer arena.deinit();
@@ -330,7 +330,7 @@ pub const PrivateKey = struct {
         };
         var numbers = try aegis.SecretBytes.init(gpa, length);
         defer numbers.deinit(gpa);
-        // unreachable: the length is the capacity just allocated
+        // glint-ignore: Z026 -- the length is the capacity just allocated
         numbers.resizeWithinCapacity(length) catch unreachable;
         const storage = numbers.exposeMut();
         var used: usize = 0;
@@ -637,9 +637,9 @@ pub fn thumbprint(key: Key) [32]u8 {
     var hash: std.crypto.hash.sha2.Sha256 = .init(.{});
     var buffer: [256]u8 = undefined;
     var w: HashWriter = .{ .hash = &hash, .writer = .{ .buffer = &buffer, .vtable = &HashWriter.vtable } };
-    // unreachable: the writer hashes what it is given and never fails
+    // glint-ignore: Z026 -- the writer hashes what it is given and never fails
     writeRequired(&w.writer, key) catch unreachable;
-    // unreachable: as above, a flush only hashes
+    // glint-ignore: Z026 -- as above, a flush only hashes
     w.writer.flush() catch unreachable;
     return hash.finalResult();
 }

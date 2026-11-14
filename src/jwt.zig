@@ -146,7 +146,7 @@ pub const NestedError = jwe.DecryptError || error{
 /// (`jwe.scratchLength(token.len)` with `decryption`), and from the keys.
 pub fn verify(comptime Claims: type, token: []const u8, keys: []const Key, validation: Validation, now: std.Io.Timestamp, scratch: []u8) VerifyError!Verified(Claims) {
     const leeway_seconds: u32 = validation.leeway.raw();
-    std.debug.assert(leeway_seconds <= 300);
+    aegis.assert.invariant(leeway_seconds <= 300, "leeway_seconds <= 300");
     var diagnostics: jws.Diagnostics = .{};
     defer if (validation.diagnostics) |d| {
         d.* = diagnostics;
@@ -282,7 +282,7 @@ pub const InspectError = jws.InspectError || error{
 /// least `jws.scratchLength(token.len)` bytes).
 pub fn inspect(comptime Claims: type, token: []const u8, inspection: Inspection, now: std.Io.Timestamp, scratch: []u8) InspectError!Inspected(Claims) {
     const leeway_seconds: u32 = inspection.leeway.raw();
-    std.debug.assert(leeway_seconds <= 300);
+    aegis.assert.invariant(leeway_seconds <= 300, "leeway_seconds <= 300");
     const header = try jws.inspect(token, inspection.max_bytes, scratch);
     const read = try readClaims(Claims, header.typ, header.payload, header.rest, inspection, now);
     return .{ .header = header, .registered = read.registered, .claims = read.claims, .rest = read.rest };

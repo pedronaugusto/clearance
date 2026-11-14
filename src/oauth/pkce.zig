@@ -37,7 +37,7 @@ pub fn challengeOf(verifier: []const u8) [length]u8 {
     std.crypto.hash.sha2.Sha256.hash(verifier, &digest, .{});
     var out: [length]u8 = undefined;
     var w: std.Io.Writer = .fixed(&out);
-    // unreachable: 32 bytes encode to exactly `length` characters
+    // glint-ignore: Z026 -- 32 bytes encode to exactly `length` characters
     base64url.encode(&w, &digest) catch unreachable;
     return out;
 }
@@ -49,7 +49,7 @@ pub fn random(io: std.Io, out: *[length]u8) void {
     const bytes = bytes_owner.exposeMut();
     io.random(bytes);
     var w: std.Io.Writer = .fixed(out);
-    // unreachable: 32 bytes encode to exactly `length` characters
+    // glint-ignore: Z026 -- 32 bytes encode to exactly `length` characters
     base64url.encode(&w, bytes) catch unreachable;
 }
 

@@ -138,7 +138,7 @@ pub fn readAuthorization(gpa: std.mem.Allocator, status: u16, body: []const u8, 
     var total: usize = 0;
     for (strings) |s| total += if (s) |v| v.len else 0;
     var storage = aegis.SecretBytes.init(gpa, total) catch return error.OutOfMemory;
-    // unreachable: the capacity was just allocated at this length
+    // glint-ignore: Z026 -- the capacity was just allocated at this length
     storage.resizeWithinCapacity(total) catch unreachable;
     var copied: [strings.len]?[]const u8 = undefined;
     const bytes = storage.exposeMut();

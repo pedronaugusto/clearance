@@ -37,7 +37,7 @@ pub const Scratch = struct {
             return;
         }
         s.heap = aegis.SecretBytes.init(gpa, capacity) catch return error.OutOfMemory;
-        // unreachable: the capacity was just allocated at this length
+        // glint-ignore: Z026 -- the capacity was just allocated at this length
         s.heap.?.resizeWithinCapacity(capacity) catch unreachable;
         s.fixed = .init(s.heap.?.exposeMut());
     }

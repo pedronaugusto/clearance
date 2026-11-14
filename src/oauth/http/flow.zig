@@ -361,7 +361,7 @@ pub const AuthorizationFlow = struct {
     fn parameters(flow: *const AuthorizationFlow, request: Begin, jkt: *[43]u8) authorize.Request {
         if (request.dpop) |session| {
             var jw: std.Io.Writer = .fixed(jkt);
-            // unreachable: a SHA-256 is 43 base64url characters
+            // glint-ignore: Z026 -- a SHA-256 is 43 base64url characters
             clearance.base64url.encode(&jw, &session.thumbprint()) catch unreachable;
         }
         return .{
@@ -422,7 +422,7 @@ pub const AuthorizationFlow = struct {
         // The code is a secret until spent: decoded into wiped memory.
         var scratch = aegis.SecretBytes.init(gpa, query.len) catch return error.OutOfMemory;
         defer scratch.deinit(gpa);
-        // unreachable: the capacity was just allocated at this length
+        // glint-ignore: Z026 -- the capacity was just allocated at this length
         scratch.resizeWithinCapacity(query.len) catch unreachable;
         const callback = try authorize.readCallback(query, .{
             .state = &flow.state,
@@ -604,7 +604,7 @@ pub fn userinfo(comptime Claims: type, arena: std.mem.Allocator, io: std.Io, htt
                 const prefix = "Bearer ";
                 var authorization = aegis.SecretBytes.init(arena, prefix.len + set.access_token.len) catch return error.OutOfMemory;
                 defer authorization.deinit(arena);
-                // unreachable: the capacity was just allocated at this length
+                // glint-ignore: Z026 -- the capacity was just allocated at this length
                 authorization.resizeWithinCapacity(prefix.len + set.access_token.len) catch unreachable;
                 @memcpy(authorization.exposeMut()[0..prefix.len], prefix);
                 @memcpy(authorization.exposeMut()[prefix.len..], set.access_token);

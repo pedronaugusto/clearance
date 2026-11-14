@@ -163,7 +163,7 @@ pub fn readIssued(gpa: std.mem.Allocator, status: u16, body: []const u8, request
     const length = clearance.jws.scratchLength(issued.token.len);
     var scratch_owner = aegis.SecretBytes.init(gpa, length) catch return error.OutOfMemory;
     defer scratch_owner.deinit(gpa);
-    // unreachable: the capacity was just allocated at this length
+    // glint-ignore: Z026 -- the capacity was just allocated at this length
     scratch_owner.resizeWithinCapacity(length) catch unreachable;
     const scratch = scratch_owner.exposeMut();
     const read = try clearance.jwt.inspect(Claims, issued.token, .{
@@ -199,7 +199,7 @@ pub fn readIssued(gpa: std.mem.Allocator, status: u16, body: []const u8, request
 
     const total = issued.token.len + if (carried) |s| s.len else 0;
     var storage = aegis.SecretBytes.init(gpa, total) catch return error.OutOfMemory;
-    // unreachable: the capacity was just allocated at this length
+    // glint-ignore: Z026 -- the capacity was just allocated at this length
     storage.resizeWithinCapacity(total) catch unreachable;
     const bytes = storage.exposeMut();
     @memcpy(bytes[0..issued.token.len], issued.token);

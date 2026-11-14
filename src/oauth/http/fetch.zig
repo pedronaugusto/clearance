@@ -172,7 +172,7 @@ pub fn postJson(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, target
     if (bearer) |token| {
         const prefix = "Bearer ";
         authorization = aegis.SecretBytes.init(gpa, prefix.len + token.len) catch return error.OutOfMemory;
-        // unreachable: the capacity was just allocated at this length
+        // glint-ignore: Z026 -- the capacity was just allocated at this length
         authorization.?.resizeWithinCapacity(prefix.len + token.len) catch unreachable;
         const bytes = authorization.?.exposeMut();
         @memcpy(bytes[0..prefix.len], prefix);
@@ -222,10 +222,10 @@ fn readSecret(gpa: std.mem.Allocator, io: std.Io, response: *uplink.Response, li
             out.reserve(gpa, @min(limit, out.capacity() * 2)) catch return error.OutOfMemory;
         }
         const at = out.len();
-        // unreachable: within the capacity just checked
+        // glint-ignore: Z026 -- within the capacity just checked
         out.resizeWithinCapacity(out.capacity()) catch unreachable;
         const n = reader.readSliceShort(out.exposeMut()[at..]) catch return readFailure(response);
-        // unreachable: shrinking within the capacity
+        // glint-ignore: Z026 -- shrinking within the capacity
         out.resizeWithinCapacity(at + n) catch unreachable;
         // A short read is the body's end.
         if (at + n < out.capacity()) return out;

@@ -172,7 +172,7 @@ pub const TokenSet = struct {
             if (value) |v| total += v.len;
         }
         var storage = aegis.SecretBytes.init(gpa, total) catch return error.OutOfMemory;
-        // unreachable: the capacity was just allocated at this length
+        // glint-ignore: Z026 -- the capacity was just allocated at this length
         storage.resizeWithinCapacity(total) catch unreachable;
         var set: TokenSet = .{ .access_token = undefined, .token_type = values.token_type, .expires_at = values.expires_at, .storage = storage, .gpa = gpa };
         var at: usize = 0;

@@ -230,7 +230,7 @@ pub fn scratchLengthJson(document_len: usize, payload_len: usize) usize {
 /// header names none, the only key that fits; the header's `jwk`, `jku`, `x5u`
 /// and `x5c` never choose or fetch a key (RFC 8725 §3.10).
 pub fn verify(token: []const u8, keys: []const Key, options: Options, scratch: []u8) VerifyError!Verified {
-    std.debug.assert(options.algorithms.len > 0);
+    aegis.assert.invariant(options.algorithms.len > 0, "options.algorithms.len > 0");
     var diagnostics: Diagnostics = .{};
     defer if (options.diagnostics) |d| {
         d.* = diagnostics;
@@ -297,7 +297,7 @@ fn headerOf(wire: WireHeader, alg: Algorithm) Header {
 /// that holds a single key by other means. The key must fit the header's
 /// algorithm, which the options must allow.
 pub fn verifyWith(token: []const u8, key: *const Key, options: Options, scratch: []u8) VerifyError!Verified {
-    std.debug.assert(options.algorithms.len > 0);
+    aegis.assert.invariant(options.algorithms.len > 0, "options.algorithms.len > 0");
     var diagnostics: Diagnostics = .{};
     defer if (options.diagnostics) |d| {
         d.* = diagnostics;
@@ -371,7 +371,7 @@ fn readSigned(piece: Piece, options: Options, rest: *[]u8, diagnostics: *Diagnos
         if (rest.len < length) return error.ScratchTooSmall;
         const input = rest.*[0..length];
         var w: Writer = .fixed(input);
-        // unreachable: `input` is the length of what is written
+        // glint-ignore: Z026 -- `input` is the length of what is written
         writeSigningInput(&w, piece.protected, payload_text, encoded and options.detached_payload != null) catch unreachable;
         rest.* = rest.*[length..];
         break :blk input;
@@ -449,7 +449,7 @@ fn decodePart(rest: *[]u8, text: []const u8, diagnostics: *Diagnostics) ReadErro
 /// its protected and unprotected names disjoint (§7.2.1), `crit` and `b64`
 /// protected. Strings live in `scratch` (`scratchLengthJson` bytes).
 pub fn verifyJson(document: []const u8, keys: []const Key, options: Options, scratch: []u8) VerifyError!Verified {
-    std.debug.assert(options.algorithms.len > 0);
+    aegis.assert.invariant(options.algorithms.len > 0, "options.algorithms.len > 0");
     var diagnostics: Diagnostics = .{};
     defer if (options.diagnostics) |d| {
         d.* = diagnostics;

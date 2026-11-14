@@ -174,7 +174,7 @@ pub fn readResponse(gpa: std.mem.Allocator, status: u16, body: []const u8, optio
     const capacity = body.len * 3 + 4096;
     var storage = aegis.SecretBytes.init(gpa, capacity) catch return error.OutOfMemory;
     errdefer storage.deinit(gpa);
-    // unreachable: the capacity was just allocated at this length
+    // glint-ignore: Z026 -- the capacity was just allocated at this length
     storage.resizeWithinCapacity(capacity) catch unreachable;
     const bytes = storage.exposeMut();
     @memcpy(bytes[0..body.len], body);

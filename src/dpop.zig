@@ -77,7 +77,7 @@ pub fn writeProof(gpa: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, key: 
 
 fn encodeInto(out: []u8, bytes: []const u8) void {
     var w: std.Io.Writer = .fixed(out);
-    // unreachable: `out` is `encodedLength(bytes.len)` long
+    // glint-ignore: Z026 -- `out` is `encodedLength(bytes.len)` long
     base64url.encode(&w, bytes) catch unreachable;
 }
 
@@ -192,9 +192,9 @@ pub fn verifyProof(io: std.Io, proof: []const u8, expected: Expected, now: std.I
 
 fn verifyChecked(io: std.Io, proof: []const u8, expected: Expected, now: std.Io.Timestamp, scratch: []u8, out: *Verified, diagnostics: *jws.Diagnostics) VerifyError!void {
     const leeway: i64 = expected.leeway.raw();
-    std.debug.assert(leeway <= 300);
-    std.debug.assert(expected.algorithms.len > 0);
-    for (expected.algorithms) |a| std.debug.assert(a.family() != .hmac);
+    aegis.assert.invariant(leeway <= 300, "leeway <= 300");
+    aegis.assert.invariant(expected.algorithms.len > 0, "expected.algorithms.len > 0");
+    for (expected.algorithms) |a| aegis.assert.invariant(a.family() != .hmac, "a.family() != .hmac");
 
     // The key first, from the header read under JWS's rules; copied out of
     // the scratch the signature check decodes into again.

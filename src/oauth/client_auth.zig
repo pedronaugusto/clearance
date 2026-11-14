@@ -168,10 +168,10 @@ pub fn encodeSecret(gpa: std.mem.Allocator, pairs: []const form.Pair) std.mem.Al
     const length: usize = @intCast(form.encodedLength(pairs));
     var body = aegis.SecretBytes.init(gpa, length) catch return error.OutOfMemory;
     errdefer body.deinit();
-    // unreachable: the capacity was just allocated at this length
+    // glint-ignore: Z026 -- the capacity was just allocated at this length
     body.resizeWithinCapacity(length) catch unreachable;
     var w: std.Io.Writer = .fixed(body.exposeMut());
-    // unreachable: `encodedLength` is what `encode` writes
+    // glint-ignore: Z026 -- `encodedLength` is what `encode` writes
     form.encode(&w, pairs) catch unreachable;
     return body;
 }
@@ -188,7 +188,7 @@ fn basic(gpa: std.mem.Allocator, id: []const u8, secret: []const u8) std.mem.All
     const prefix = "Basic ";
     const length = prefix.len + std.base64.standard.Encoder.calcSize(raw.len);
     var out = aegis.SecretBytes.init(gpa, length) catch return error.OutOfMemory;
-    // unreachable: the capacity was just allocated at this length
+    // glint-ignore: Z026 -- the capacity was just allocated at this length
     out.resizeWithinCapacity(length) catch unreachable;
     const bytes = out.exposeMut();
     @memcpy(bytes[0..prefix.len], prefix);
