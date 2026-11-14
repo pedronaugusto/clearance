@@ -57,15 +57,13 @@
       {"id": "A007", "level": "gate"},
       {"id": "A008", "level": "gate"},
       {"id": "A009", "level": "gate"},
-      {"id": "A010", "level": "gate"},
       {"id": "A011", "level": "gate"},
       {"id": "A012", "level": "gate"},
       {"id": "A013", "level": "gate"},
-      {"id": "A014", "level": "gate"},
+      {"id": "P009", "level": "gate"},
       {"id": "A015", "level": "gate"},
-      {"id": "A016", "level": "gate"},
-      {"id": "A019", "level": "gate"},
-      {"id": "A020", "level": "gate"},
+      {"id": "P008", "level": "gate"},
+      {"id": "P007", "level": "gate"},
       {"id": "A021", "level": "gate"}
     ]
   }
