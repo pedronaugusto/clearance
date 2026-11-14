@@ -134,16 +134,17 @@ pub const Error = error{
 /// A null `client` adds nothing: a request whose grant is its own
 /// credential.
 pub fn formRequest(gpa: std.mem.Allocator, io: std.Io, maybe_client: ?Client, pairs: []const form.Pair, context: Context) Error!FormRequest {
-    var all: std.ArrayList(form.Pair) = .empty;
+    // The client's own fields are at most three (an assertion's).
+    var all: Fields = try .init(gpa, pairs.len + 3);
     defer all.deinit(gpa);
-    try all.appendSlice(gpa, pairs);
+    all.add(pairs);
     var assertion: std.Io.Writer.Allocating = .init(gpa);
     defer assertion.deinit();
     var authorization: ?aegis.SecretBytes = null;
     errdefer if (authorization) |*a| a.deinit(gpa);
     if (maybe_client) |client| switch (client.credentials) {
-        .none, .tls_client_auth, .self_signed_tls_client_auth => try all.append(gpa, .{ .name = "client_id", .value = client.id }),
-        .client_secret_post => |secret| try all.appendSlice(gpa, &.{
+        .none, .tls_client_auth, .self_signed_tls_client_auth => all.add(&.{.{ .name = "client_id", .value = client.id }}),
+        .client_secret_post => |secret| all.add(&.{
             .{ .name = "client_id", .value = client.id },
             .{ .name = "client_secret", .value = secret },
         }),
@@ -151,17 +152,46 @@ pub fn formRequest(gpa: std.mem.Allocator, io: std.Io, maybe_client: ?Client, pa
         inline .private_key_jwt, .client_secret_jwt => |p, method| {
             const key: PrivateKeyJwt = if (method == .private_key_jwt) p else .{ .signer = .{ .hmac = .{ .alg = .hs256, .secret = p } } };
             try signAssertion(gpa, io, &assertion.writer, client.id, key, context);
-            try all.appendSlice(gpa, &.{
+            all.add(&.{
                 .{ .name = "client_id", .value = client.id },
                 .{ .name = "client_assertion_type", .value = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer" },
                 .{ .name = "client_assertion", .value = assertion.written() },
             });
         },
     };
-    var body = try encodeSecret(gpa, all.items);
+    var body = try encodeSecret(gpa, all.items());
     errdefer body.deinit(gpa);
     return .{ .body = body, .authorization = authorization, .gpa = gpa };
 }
+
+/// A request's form fields, gathered into room stated before the first:
+/// each request knows from what it is asked how many fields it sends, so the
+/// room never grows.
+pub const Fields = struct {
+    /// Private: the room, the first `len` of it filled.
+    room: []form.Pair,
+    len: usize = 0,
+
+    pub fn init(gpa: std.mem.Allocator, capacity: usize) std.mem.Allocator.Error!Fields {
+        return .{ .room = try gpa.alloc(form.Pair, capacity) };
+    }
+
+    pub fn deinit(f: *Fields, gpa: std.mem.Allocator) void {
+        gpa.free(f.room);
+        f.* = undefined;
+    }
+
+    /// Adds `pairs`, which the room stated holds.
+    pub fn add(f: *Fields, pairs: []const form.Pair) void {
+        aegis.assert.invariant(pairs.len <= f.room.len - f.len, "pairs.len <= f.room.len - f.len");
+        @memcpy(f.room[f.len..][0..pairs.len], pairs);
+        f.len += pairs.len;
+    }
+
+    pub fn items(f: *const Fields) []const form.Pair {
+        return f.room[0..f.len];
+    }
+};
 
 /// `pairs` form-encoded into wiped memory of exactly their length.
 pub fn encodeSecret(gpa: std.mem.Allocator, pairs: []const form.Pair) std.mem.Allocator.Error!aegis.SecretBytes {

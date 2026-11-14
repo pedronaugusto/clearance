@@ -4,6 +4,9 @@
 //! The proofs themselves are `clearance.dpop`'s.
 const std = @import("std");
 const aegis = @import("aegis");
+
+/// The lock order, of one lock: the nonces each origin asked for.
+const Locks = aegis.Order(&.{.{ .name = "nonces" }});
 const clearance = @import("clearance");
 const errors = @import("errors.zig");
 const url = @import("url.zig");
@@ -25,7 +28,7 @@ pub const max_origins = 8;
 pub const Session = struct {
     key: proofs.Key,
     /// The nonces each origin gave.
-    origins: aegis.BlockingGuarded(Origins) = .init(.{}),
+    origins: Locks.Ordered(aegis.BlockingGuarded(Origins), 0) = .init(.init(.{})),
 
     const Origins = struct {
         slots: [max_origins]Slot = @splat(.{}),
@@ -66,10 +69,12 @@ pub const Session = struct {
     /// A nonce that is longer than 256 bytes or not printable is not kept:
     /// it could not be sent back.
     pub fn remember(s: *Session, io: std.Io, target: []const u8, nonce: []const u8) void {
+        // glint-ignore: Z026 -- a target with no origin has no nonce to keep: none could be sent back to it
         const origin = url.originOf(target) catch return;
         if (nonce.len == 0 or nonce.len > 256 or origin.len > 256) return;
         for (nonce) |c| if (c < 0x21 or c > 0x7e) return;
-        var held = s.origins.acquireUncancelable(io);
+        var order: Locks.Context = .{};
+        var held = s.origins.acquireOrderedUncancelable(io, &order);
         defer held.deinit(io);
         const o = held.value();
         const slot = o.find(origin) orelse o.claim(origin);
@@ -83,7 +88,8 @@ pub const Session = struct {
         var nonce: errors.Text(256) = .{};
         const origin = url.originOf(target) catch return error.InvalidTarget;
         {
-            var held = s.origins.acquireUncancelable(io);
+            var order: Locks.Context = .{};
+            var held = s.origins.acquireOrderedUncancelable(io, &order);
             defer held.deinit(io);
             if (held.value().find(origin)) |slot| nonce = slot.nonce;
         }

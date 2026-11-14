@@ -7,6 +7,9 @@
 const std = @import("std");
 const time = @import("clearance").time;
 const aegis = @import("aegis");
+
+/// The lock order, of one lock: the cached introspection answers.
+pub const Locks = aegis.Order(&.{.{ .name = "answers" }});
 const uplink = @import("uplink");
 const client_auth = @import("../client_auth.zig");
 const introspection = @import("../introspection.zig");
@@ -54,7 +57,7 @@ issuer: []const u8,
 client: client_auth.Client,
 options: Options,
 /// The answers kept, by the token's hash.
-entries: aegis.BlockingGuarded(Entries) = .init(.empty),
+entries: Locks.Ordered(aegis.BlockingGuarded(Entries), 0) = .init(.init(.empty)),
 
 const Entries = std.AutoHashMapUnmanaged([32]u8, Entry);
 
@@ -91,7 +94,8 @@ pub fn introspect(i: *Introspector, io: std.Io, http: *uplink.Client, arena: std
     const now = std.Io.Clock.real.now(io);
     const now_s: i64 = time.unixSeconds(now);
     {
-        var held = try i.entries.acquire(io);
+        var order: Locks.Context = .{};
+        var held = try i.entries.acquireOrdered(io, &order);
         defer held.deinit(io);
         if (held.value().get(key)) |e| if (now_s < e.until) return .{ .introspected = try clone(arena, e.value) };
     }
@@ -117,7 +121,8 @@ pub fn introspect(i: *Introspector, io: std.Io, http: *uplink.Client, arena: std
     entry.until = if (value.active) @min(bound, value.exp orelse bound) else bound;
     if (entry.until <= now_s or i.options.max_entries == 0) return .{ .introspected = out };
 
-    var held = try i.entries.acquire(io);
+    var order: Locks.Context = .{};
+    var held = try i.entries.acquireOrdered(io, &order);
     defer held.deinit(io);
     const entries = held.value();
     if (entries.count() >= i.options.max_entries) evict(i.gpa, entries, now_s);
@@ -133,23 +138,29 @@ pub fn introspect(i: *Introspector, io: std.Io, http: *uplink.Client, arena: std
 fn evict(gpa: std.mem.Allocator, entries: *Entries, now: i64) void {
     var soonest: ?[32]u8 = null;
     var soonest_until: i64 = std.math.maxInt(i64);
-    var expired: std.ArrayList([32]u8) = .empty;
-    defer expired.deinit(gpa);
+    // Room for every entry, so each expired one is listed; without that
+    // room, none is, and the soonest to expire is dropped.
+    var none: [0][32]u8 = .{};
+    const room: [][32]u8 = gpa.alloc([32]u8, entries.count()) catch &none;
+    defer gpa.free(room);
+    var expired: usize = 0;
     var it = entries.iterator();
     while (it.next()) |e| {
         if (e.value_ptr.until <= now) {
-            // Without room to list more, those listed are dropped, or the soonest.
-            expired.append(gpa, e.key_ptr.*) catch break;
+            if (expired < room.len) {
+                room[expired] = e.key_ptr.*;
+                expired += 1;
+            }
         } else if (e.value_ptr.until < soonest_until) {
             soonest_until = e.value_ptr.until;
             soonest = e.key_ptr.*;
         }
     }
-    for (expired.items) |k| if (entries.fetchRemove(k)) |kv| {
+    for (room[0..expired]) |k| if (entries.fetchRemove(k)) |kv| {
         var e = kv.value;
         drop(gpa, &e);
     };
-    if (expired.items.len != 0) return;
+    if (expired != 0) return;
     if (soonest) |k| if (entries.fetchRemove(k)) |kv| {
         var e = kv.value;
         drop(gpa, &e);

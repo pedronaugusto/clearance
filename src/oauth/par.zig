@@ -19,16 +19,20 @@ pub const max_request_uri = 1024;
 /// (RFC 9126 §2.1). `client_id` is sent once: in the parameters, unless the
 /// client's authentication puts it in the body itself.
 pub fn request(gpa: std.mem.Allocator, io: std.Io, client: client_auth.Client, ask: authorize.Request, context: client_auth.Context) client_auth.Error!client_auth.FormRequest {
-    var pairs: std.ArrayList(form.Pair) = .empty;
-    defer pairs.deinit(gpa);
     const in_body = switch (client.credentials) {
         // `Basic` carries the id in the header only.
         .client_secret_basic => false,
         else => true,
     };
-    var it: authorize.Params = .{ .request = ask, .client_id = !in_body };
-    while (it.next()) |pair| try pairs.append(gpa, pair);
-    return client_auth.formRequest(gpa, io, client, pairs.items, context);
+    const params: authorize.Params = .{ .request = ask, .client_id = !in_body };
+    var count: usize = 0;
+    var counting = params;
+    while (counting.next()) |_| count += 1;
+    var pairs: client_auth.Fields = try .init(gpa, count);
+    defer pairs.deinit(gpa);
+    var it = params;
+    while (it.next()) |pair| pairs.add(&.{pair});
+    return client_auth.formRequest(gpa, io, client, pairs.items(), context);
 }
 
 /// The push of a request object (RFC 9126 §3, RFC 9101): `request` alone

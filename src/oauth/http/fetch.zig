@@ -118,20 +118,23 @@ fn getWith(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, target: []c
     if (response.headers.get("dpop-nonce")) |n| if (n.len <= 256) {
         answer.dpop_nonce = .init(n);
     };
-    var lines: std.ArrayList([]const u8) = .empty;
+    var count: usize = 0;
+    var counting = response.headers.iterator();
+    while (counting.next()) |f| {
+        if (std.ascii.eqlIgnoreCase(f.name, "www-authenticate")) count += 1;
+    }
+    const lines = try gpa.alloc([]const u8, count);
+    var copied: usize = 0;
     errdefer {
-        for (lines.items) |l| gpa.free(l);
-        lines.deinit(gpa);
+        for (lines[0..copied]) |l| gpa.free(l);
+        gpa.free(lines);
     }
     var it = response.headers.iterator();
     while (it.next()) |f| if (std.ascii.eqlIgnoreCase(f.name, "www-authenticate")) {
-        const line = try gpa.dupe(u8, f.value);
-        lines.append(gpa, line) catch {
-            gpa.free(line);
-            return error.OutOfMemory;
-        };
+        lines[copied] = try gpa.dupe(u8, f.value);
+        copied += 1;
     };
-    answer.challenges = try lines.toOwnedSlice(gpa);
+    answer.challenges = lines;
     return answer;
 }
 

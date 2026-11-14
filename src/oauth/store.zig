@@ -6,6 +6,9 @@
 //! what it wrote as the secret it is.
 const std = @import("std");
 const aegis = @import("aegis");
+
+/// The lock order, of one lock: the stored token sets.
+const Locks = aegis.Order(&.{.{ .name = "sets" }});
 const token = @import("token.zig");
 
 const TokenSet = token.TokenSet;
@@ -53,7 +56,7 @@ pub const TokenStore = struct {
 pub const Memory = struct {
     gpa: std.mem.Allocator,
     /// Keys are owned.
-    sets: aegis.BlockingGuarded(Sets) = .init(.empty),
+    sets: Locks.Ordered(aegis.BlockingGuarded(Sets), 0) = .init(.init(.empty)),
     /// The memory as the flows take it.
     store: TokenStore = .{ .loadFn = load, .saveFn = save, .forgetFn = forget },
 
@@ -76,7 +79,8 @@ pub const Memory = struct {
 
     fn load(s: *TokenStore, io: std.Io, gpa: std.mem.Allocator, key: []const u8) LoadError!?TokenSet {
         const m: *Memory = @fieldParentPtr("store", s);
-        var held = try m.sets.acquire(io);
+        var order: Locks.Context = .{};
+        var held = try m.sets.acquireOrdered(io, &order);
         defer held.deinit(io);
         const set = held.value().getPtr(key) orelse return null;
         return try TokenSet.init(gpa, set.borrow());
@@ -86,7 +90,8 @@ pub const Memory = struct {
         const m: *Memory = @fieldParentPtr("store", s);
         var copy = try TokenSet.init(m.gpa, set.borrow());
         errdefer copy.deinit();
-        var held = try m.sets.acquire(io);
+        var order: Locks.Context = .{};
+        var held = try m.sets.acquireOrdered(io, &order);
         defer held.deinit(io);
         const sets = held.value();
         const entry = try sets.getOrPut(m.gpa, key);
@@ -103,7 +108,8 @@ pub const Memory = struct {
 
     fn forget(s: *TokenStore, io: std.Io, key: []const u8) std.Io.Cancelable!void {
         const m: *Memory = @fieldParentPtr("store", s);
-        var held = m.sets.acquireUncancelable(io);
+        var order: Locks.Context = .{};
+        var held = m.sets.acquireOrderedUncancelable(io, &order);
         defer held.deinit(io);
         const entry = held.value().fetchRemove(key) orelse return;
         var set = entry.value;

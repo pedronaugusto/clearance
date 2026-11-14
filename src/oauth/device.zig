@@ -35,12 +35,12 @@ pub const Request = struct {
 /// The device authorization request, authenticated as `client` says (a
 /// public client sends its `client_id`, RFC 8628 §3.1).
 pub fn request(gpa: std.mem.Allocator, io: std.Io, client: client_auth.Client, ask: Request, context: client_auth.Context) client_auth.Error!client_auth.FormRequest {
-    var pairs: std.ArrayList(form.Pair) = .empty;
+    var pairs: client_auth.Fields = try .init(gpa, 1 + ask.resources.len + ask.extra.len);
     defer pairs.deinit(gpa);
-    if (ask.scope) |scope| try pairs.append(gpa, .{ .name = "scope", .value = scope });
-    for (ask.resources) |resource| try pairs.append(gpa, .{ .name = "resource", .value = resource });
-    try pairs.appendSlice(gpa, ask.extra);
-    return client_auth.formRequest(gpa, io, client, pairs.items, context);
+    if (ask.scope) |scope| pairs.add(&.{.{ .name = "scope", .value = scope }});
+    for (ask.resources) |resource| pairs.add(&.{.{ .name = "resource", .value = resource }});
+    pairs.add(ask.extra);
+    return client_auth.formRequest(gpa, io, client, pairs.items(), context);
 }
 
 /// What the server answered (RFC 8628 §3.2), owned. The device code is a

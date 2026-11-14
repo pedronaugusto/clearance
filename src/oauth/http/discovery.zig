@@ -91,10 +91,18 @@ pub fn protectedResource(
 /// (`insufficient_scope`: a step-up, `challenge.writeStepUp`). Null when no
 /// challenge is Bearer. Strings live in `arena`.
 pub fn bearerChallenge(arena: std.mem.Allocator, headers: *const uplink.Headers) challenge.ReadError!?challenge.Bearer {
-    var values: std.ArrayList([]const u8) = .empty;
+    var count: usize = 0;
+    var counting = headers.iterator();
+    while (counting.next()) |f| {
+        if (std.ascii.eqlIgnoreCase(f.name, "www-authenticate")) count += 1;
+    }
+    const values = try arena.alloc([]const u8, count);
+    var at: usize = 0;
     var it = headers.iterator();
     while (it.next()) |f| {
-        if (std.ascii.eqlIgnoreCase(f.name, "www-authenticate")) try values.append(arena, f.value);
+        if (!std.ascii.eqlIgnoreCase(f.name, "www-authenticate")) continue;
+        values[at] = f.value;
+        at += 1;
     }
-    return challenge.read(arena, values.items);
+    return challenge.read(arena, values);
 }

@@ -44,7 +44,7 @@ pub const Scratch = struct {
 
     pub fn deinit(s: *Scratch) void {
         if (s.heap) |*h| return h.deinit(s.gpa);
-        // only what the parser reached is wiped, by its high-water mark; the whole buffer would cost more than the parse
+        // glint-ignore: A008 -- only what the parser reached is wiped, by its high-water mark; the whole buffer would cost more than the parse
         std.crypto.secureZero(u8, s.stack[0..s.high]);
     }
 

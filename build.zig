@@ -72,6 +72,7 @@ pub fn dev(b: *std.Build, tools: type) void {
     const properties_step = b.step("properties", "Run the properties alone");
     properties_step.dependOn(&b.addRunArtifact(properties).step);
     check.dependOn(&properties.step);
+    // glint-ignore: Z026 -- a lazy dependency not fetched yet ends this configure pass; the build fetches it and configures again
     const uplink_package = p.dependencyLazy("uplink", .{ .target = target, .optimize = optimize }) catch return;
     const oauth_tests = suite(b, "clearance-oauth-tests", "clearance.oauth", target, optimize, filters);
     const oauth_run = b.addRunArtifact(oauth_tests);

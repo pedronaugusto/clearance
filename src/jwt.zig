@@ -4,6 +4,9 @@
 const std = @import("std");
 const time = @import("time.zig");
 const aegis = @import("aegis");
+
+/// The lock order, of one lock: a replay cache's entries.
+pub const Locks = aegis.Order(&.{.{ .name = "replay" }});
 const strand = @import("strand");
 const jws = @import("jws.zig");
 const jwe = @import("jwe.zig");
@@ -217,7 +220,7 @@ pub fn decryptNested(token: []const u8, decryption: Decryption, scratch: []u8, d
     // Read before the header's strings, which live past the content, are wiped.
     const content_type: ContentType = if (d.header.cty) |cty| (if (mediaTypeIs(cty, "JWT")) .jwt else .other) else .none;
     @memmove(scratch[0..d.plaintext.len], d.plaintext);
-    // the caller's scratch, borrowed: what decryption left past the content is wiped before it is handed back
+    // glint-ignore: A008 -- the caller's scratch, borrowed: what decryption left past the content is wiped before it is handed back
     std.crypto.secureZero(u8, scratch[d.plaintext.len..]);
     return .{ .alg = d.header.alg, .enc = d.header.enc, .content_type = content_type, .content = scratch[0..d.plaintext.len], .rest = scratch[d.plaintext.len..] };
 }
@@ -437,7 +440,7 @@ pub fn replayId(scope: []const u8, id: []const u8) [32]u8 {
 pub const MemoryReplay = struct {
     gpa: std.mem.Allocator,
     /// Each identifier and the second its life ends.
-    entries: aegis.BlockingGuarded(Entries),
+    entries: Locks.Ordered(aegis.BlockingGuarded(Entries), 0),
     capacity: u32,
     /// The set as verification takes it.
     replay: Replay = .{ .recordFn = record },
@@ -447,7 +450,7 @@ pub const MemoryReplay = struct {
     pub fn init(gpa: std.mem.Allocator, capacity: u32) std.mem.Allocator.Error!MemoryReplay {
         var entries: Entries = .empty;
         try entries.ensureTotalCapacity(gpa, capacity);
-        return .{ .gpa = gpa, .entries = .init(entries), .capacity = capacity };
+        return .{ .gpa = gpa, .entries = .init(.init(entries)), .capacity = capacity };
     }
 
     pub fn deinit(m: *MemoryReplay) void {
@@ -457,7 +460,8 @@ pub const MemoryReplay = struct {
 
     fn record(r: *Replay, io: std.Io, id: [32]u8, until: i64, now: i64) Replay.RecordError!bool {
         const m: *MemoryReplay = @fieldParentPtr("replay", r);
-        var held = m.entries.acquireUncancelable(io);
+        var order: Locks.Context = .{};
+        var held = m.entries.acquireOrderedUncancelable(io, &order);
         defer held.deinit(io);
         const entries = held.value();
         if (entries.getPtr(id)) |end| {

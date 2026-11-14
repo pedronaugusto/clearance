@@ -1048,7 +1048,8 @@ test "introspection answers are kept until the bound, by the token's hash" {
     _ = try introspector.introspect(io, &http, arena.allocator(), "bad");
     // A third token evicts one of two: the cache stays bounded.
     _ = try introspector.introspect(io, &http, arena.allocator(), "other");
-    var held = introspector.entries.acquireUncancelable(io);
+    var order: oauth.Introspector.Locks.Context = .{};
+    var held = introspector.entries.acquireOrderedUncancelable(io, &order);
     defer held.deinit(io);
     try testing.expectEqual(@as(u32, 2), held.value().count());
     p.mutex.lockUncancelable(io);

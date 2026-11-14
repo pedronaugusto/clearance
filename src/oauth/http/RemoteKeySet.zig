@@ -12,6 +12,9 @@
 const std = @import("std");
 const time = @import("clearance").time;
 const aegis = @import("aegis");
+
+/// The lock order, of one lock: the key set fetched and its refresh.
+const Locks = aegis.Order(&.{.{ .name = "keys" }});
 const uplink = @import("uplink");
 const clearance = @import("clearance");
 const fetch = @import("fetch.zig");
@@ -55,7 +58,7 @@ pub const LeaseError = FetchError || error{
 };
 
 /// A set as it was fetched, shared by its leases.
-const Snapshot = struct {
+pub const Snapshot = struct {
     gpa: std.mem.Allocator,
     set: jwk.KeySet,
     /// One for the key set holding it as its current one, one per lease.
@@ -91,7 +94,7 @@ gpa: std.mem.Allocator,
 uri: []const u8,
 options: Options,
 /// The set held and how its fetches went.
-state: aegis.BlockingGuarded(State) = .init(.{}),
+state: Locks.Ordered(aegis.BlockingGuarded(State), 0) = .init(.init(.{})),
 /// Broadcast when a fetch ends.
 fetched: aegis.Condition = .init(),
 
@@ -143,7 +146,8 @@ pub fn lease(r: *RemoteKeySet, io: std.Io, http: *uplink.Client, want: Want) (Le
         const now = seconds(io);
         // Under the lock: the set held, a wait for a fetch, or this task's own fetch.
         const previous_attempt = plan: {
-            var guard = try r.state.acquire(io);
+            var order: Locks.Context = .{};
+            var guard = try r.state.acquireOrdered(io, &order);
             defer guard.deinit(io);
             const state = guard.value();
             const held = state.current;
@@ -170,7 +174,8 @@ pub fn lease(r: *RemoteKeySet, io: std.Io, http: *uplink.Client, want: Want) (Le
             break :plan state.last_attempt;
         };
         const result = r.fetchSet(io, http, now);
-        var guard = r.state.acquireUncancelable(io);
+        var order: Locks.Context = .{};
+        var guard = r.state.acquireOrderedUncancelable(io, &order);
         defer guard.deinit(io);
         const after = guard.value();
         after.fetching = false;

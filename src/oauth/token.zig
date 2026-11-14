@@ -76,38 +76,39 @@ pub const RequestOptions = struct {
 /// sends no client at all (a JWT-bearer grant whose assertion is the only
 /// credential, RFC 7521 §4.1).
 pub fn request(gpa: std.mem.Allocator, io: std.Io, client: ?client_auth.Client, grant: Grant, options: RequestOptions, context: client_auth.Context) client_auth.Error!client_auth.FormRequest {
-    var pairs: std.ArrayList(form.Pair) = .empty;
+    // A grant's own fields are at most six (a token exchange's, with its type).
+    var pairs: client_auth.Fields = try .init(gpa, 6 + options.resources.len + options.extra.len);
     defer pairs.deinit(gpa);
-    try pairs.append(gpa, .{ .name = "grant_type", .value = grant.typeName() });
+    pairs.add(&.{.{ .name = "grant_type", .value = grant.typeName() }});
     switch (grant) {
-        .authorization_code => |g| try pairs.appendSlice(gpa, &.{
+        .authorization_code => |g| pairs.add(&.{
             .{ .name = "code", .value = g.code },
             .{ .name = "redirect_uri", .value = g.redirect_uri },
             .{ .name = "code_verifier", .value = g.code_verifier },
         }),
         .refresh_token => |g| {
-            try pairs.append(gpa, .{ .name = "refresh_token", .value = g.refresh_token });
-            if (g.scope) |scope| try pairs.append(gpa, .{ .name = "scope", .value = scope });
+            pairs.add(&.{.{ .name = "refresh_token", .value = g.refresh_token }});
+            if (g.scope) |scope| pairs.add(&.{.{ .name = "scope", .value = scope }});
         },
-        .client_credentials => |g| if (g.scope) |scope| try pairs.append(gpa, .{ .name = "scope", .value = scope }),
+        .client_credentials => |g| if (g.scope) |scope| pairs.add(&.{.{ .name = "scope", .value = scope }}),
         .token_exchange => |g| {
-            if (g.requested_token_type) |t| try pairs.append(gpa, .{ .name = "requested_token_type", .value = t });
-            try pairs.appendSlice(gpa, &.{
+            if (g.requested_token_type) |t| pairs.add(&.{.{ .name = "requested_token_type", .value = t }});
+            pairs.add(&.{
                 .{ .name = "subject_token", .value = g.subject_token },
                 .{ .name = "subject_token_type", .value = g.subject_token_type },
             });
-            if (g.audience) |a| try pairs.append(gpa, .{ .name = "audience", .value = a });
-            if (g.scope) |scope| try pairs.append(gpa, .{ .name = "scope", .value = scope });
+            if (g.audience) |a| pairs.add(&.{.{ .name = "audience", .value = a }});
+            if (g.scope) |scope| pairs.add(&.{.{ .name = "scope", .value = scope }});
         },
         .jwt_bearer => |g| {
-            try pairs.append(gpa, .{ .name = "assertion", .value = g.assertion });
-            if (g.scope) |scope| try pairs.append(gpa, .{ .name = "scope", .value = scope });
+            pairs.add(&.{.{ .name = "assertion", .value = g.assertion }});
+            if (g.scope) |scope| pairs.add(&.{.{ .name = "scope", .value = scope }});
         },
-        .device_code => |g| try pairs.append(gpa, .{ .name = "device_code", .value = g.device_code }),
+        .device_code => |g| pairs.add(&.{.{ .name = "device_code", .value = g.device_code }}),
     }
-    for (options.resources) |resource| try pairs.append(gpa, .{ .name = "resource", .value = resource });
-    try pairs.appendSlice(gpa, options.extra);
-    return client_auth.formRequest(gpa, io, client, pairs.items, context);
+    for (options.resources) |resource| pairs.add(&.{.{ .name = "resource", .value = resource }});
+    pairs.add(options.extra);
+    return client_auth.formRequest(gpa, io, client, pairs.items(), context);
 }
 
 /// The token types clearance uses. A response naming another is refused: a
