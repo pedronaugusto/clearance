@@ -42,6 +42,12 @@ pub fn encodedLength(length: usize) usize {
     return codecs.Encoder.calcSize(length);
 }
 
+/// Encodes `bytes` into the start of `out`, which holds at least
+/// `encodedLength(bytes.len)` bytes, and returns what was written.
+pub fn encodeInto(out: []u8, bytes: []const u8) []const u8 {
+    return codecs.Encoder.encode(out, bytes);
+}
+
 /// Writes the encoding of `bytes`.
 pub fn encode(w: *std.Io.Writer, bytes: []const u8) std.Io.Writer.Error!void {
     var chunk: [3 * 64]u8 = undefined;

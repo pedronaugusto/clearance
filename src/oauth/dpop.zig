@@ -69,8 +69,8 @@ pub const Session = struct {
     /// A nonce that is longer than 256 bytes or not printable is not kept:
     /// it could not be sent back.
     pub fn remember(s: *Session, io: std.Io, target: []const u8, nonce: []const u8) void {
-        // glint-ignore: Z026 -- a target with no origin has no nonce to keep: none could be sent back to it
-        const origin = url.originOf(target) catch return;
+        // A target with no origin has no nonce to keep: none could be sent back to it.
+        const origin = (url.originOf(target) catch null) orelse return;
         if (nonce.len == 0 or nonce.len > 256 or origin.len > 256) return;
         for (nonce) |c| if (c < 0x21 or c > 0x7e) return;
         var order: Locks.Context = .{};

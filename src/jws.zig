@@ -370,9 +370,7 @@ fn readSigned(piece: Piece, options: Options, rest: *[]u8, diagnostics: *Diagnos
         const length = piece.protected.len + 1 + payload_length;
         if (rest.len < length) return error.ScratchTooSmall;
         const input = rest.*[0..length];
-        var w: Writer = .fixed(input);
-        // glint-ignore: Z026 -- `input` is the length of what is written
-        writeSigningInput(&w, piece.protected, payload_text, encoded and options.detached_payload != null) catch unreachable;
+        signingInputInto(input, piece.protected, payload_text, encoded and options.detached_payload != null);
         rest.* = rest.*[length..];
         break :blk input;
     };
@@ -381,10 +379,17 @@ fn readSigned(piece: Piece, options: Options, rest: *[]u8, diagnostics: *Diagnos
     return .{ .wire = wire, .protected = header_bytes, .payload = payload, .signature = signature, .signing_input = signing_input };
 }
 
-fn writeSigningInput(w: *Writer, protected: []const u8, payload: []const u8, encode: bool) Writer.Error!void {
-    try w.writeAll(protected);
-    try w.writeByte('.');
-    if (encode) try base64url.encode(w, payload) else try w.writeAll(payload);
+/// `protected '.' payload` into `out`, exactly its length, the payload
+/// base64url encoded first when `encode`.
+fn signingInputInto(out: []u8, protected: []const u8, payload: []const u8, encode: bool) void {
+    @memcpy(out[0..protected.len], protected);
+    out[protected.len] = '.';
+    const rest = out[protected.len + 1 ..];
+    if (encode) {
+        _ = base64url.encodeInto(rest, payload);
+    } else {
+        @memcpy(rest, payload);
+    }
 }
 
 /// A JWS read but not verified: its header and payload, for a holder that

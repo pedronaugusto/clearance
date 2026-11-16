@@ -578,7 +578,7 @@ fn bitLength(big_endian: []const u8) usize {
 /// lexicographic order. A secret (`oct`) key is not public.
 pub fn writePublic(w: *std.Io.Writer, key: Key) (std.Io.Writer.Error || error{NotPublic})!void {
     if (key.material == .hmac) return error.NotPublic;
-    try writeRequired(w, key);
+    try writeRequired(WriterSink{ .w = w }, key);
 }
 
 pub const PublicError = error{
@@ -635,12 +635,7 @@ pub fn readPublic(arena: std.mem.Allocator, document: []const u8, purpose: Purpo
 /// in lexicographic order, without whitespace.
 pub fn thumbprint(key: Key) [32]u8 {
     var hash: std.crypto.hash.sha2.Sha256 = .init(.{});
-    var buffer: [256]u8 = undefined;
-    var w: HashWriter = .{ .hash = &hash, .writer = .{ .buffer = &buffer, .vtable = &HashWriter.vtable } };
-    // glint-ignore: Z026 -- the writer hashes what it is given and never fails
-    writeRequired(&w.writer, key) catch unreachable;
-    // glint-ignore: Z026 -- as above, a flush only hashes
-    w.writer.flush() catch unreachable;
+    writeRequired(HashSink{ .hash = &hash }, key) catch |err| switch (err) {};
     return hash.finalResult();
 }
 
@@ -651,69 +646,80 @@ pub fn writeThumbprintUri(w: *std.Io.Writer, key: Key) std.Io.Writer.Error!void 
     try base64url.encode(w, &thumbprint(key));
 }
 
-fn writeRequired(w: *std.Io.Writer, key: Key) std.Io.Writer.Error!void {
+/// Where `writeRequired` puts the members' bytes: a writer, which can fail.
+const WriterSink = struct {
+    w: *std.Io.Writer,
+
+    const Error = std.Io.Writer.Error;
+
+    fn put(s: WriterSink, bytes: []const u8) Error!void {
+        return s.w.writeAll(bytes);
+    }
+};
+
+/// Where `writeRequired` puts the members' bytes: a hash, which cannot.
+const HashSink = struct {
+    hash: *std.crypto.hash.sha2.Sha256,
+
+    const Error = error{};
+
+    fn put(s: HashSink, bytes: []const u8) Error!void {
+        s.hash.update(bytes);
+    }
+};
+
+/// The base64url encoding of `bytes`, put in chunks of whole groups.
+fn putEncoded(sink: anytype, bytes: []const u8) @TypeOf(sink).Error!void {
+    var encoded: [4 * 64]u8 = undefined;
+    var rest = bytes;
+    while (rest.len > 0) {
+        const n = @min(rest.len, 3 * 64);
+        try sink.put(base64url.encodeInto(&encoded, rest[0..n]));
+        rest = rest[n..];
+    }
+}
+
+fn writeRequired(sink: anytype, key: Key) @TypeOf(sink).Error!void {
     switch (key.material) {
         .rsa => |rsa| {
-            try w.writeAll("{\"e\":\"");
-            try base64url.encode(w, rsa.e);
-            try w.writeAll("\",\"kty\":\"RSA\",\"n\":\"");
-            try base64url.encode(w, rsa.n);
-            try w.writeAll("\"}");
+            try sink.put("{\"e\":\"");
+            try putEncoded(sink, rsa.e);
+            try sink.put("\",\"kty\":\"RSA\",\"n\":\"");
+            try putEncoded(sink, rsa.n);
+            try sink.put("\"}");
         },
         .ec => |ec| {
             const width = (ec.point.len - 1) / 2;
-            try w.writeAll(switch (ec.curve) {
+            try sink.put(switch (ec.curve) {
                 .p256 => "{\"crv\":\"P-256\",\"kty\":\"EC\",\"x\":\"",
                 .p384 => "{\"crv\":\"P-384\",\"kty\":\"EC\",\"x\":\"",
                 .p521 => "{\"crv\":\"P-521\",\"kty\":\"EC\",\"x\":\"",
             });
-            try base64url.encode(w, ec.point[1..][0..width]);
-            try w.writeAll("\",\"y\":\"");
-            try base64url.encode(w, ec.point[1 + width ..]);
-            try w.writeAll("\"}");
+            try putEncoded(sink, ec.point[1..][0..width]);
+            try sink.put("\",\"y\":\"");
+            try putEncoded(sink, ec.point[1 + width ..]);
+            try sink.put("\"}");
         },
         .okp => |okp| {
-            try w.writeAll(if (okp.curve == .ed25519) "{\"crv\":\"Ed25519\",\"kty\":\"OKP\",\"x\":\"" else "{\"crv\":\"X25519\",\"kty\":\"OKP\",\"x\":\"");
-            try base64url.encode(w, okp.x);
-            try w.writeAll("\"}");
+            try sink.put(if (okp.curve == .ed25519) "{\"crv\":\"Ed25519\",\"kty\":\"OKP\",\"x\":\"" else "{\"crv\":\"X25519\",\"kty\":\"OKP\",\"x\":\"");
+            try putEncoded(sink, okp.x);
+            try sink.put("\"}");
         },
         // RFC 9964 §6: `alg`, `kty`, `pub`.
         .akp => |akp| {
-            try w.writeAll("{\"alg\":\"");
-            try w.writeAll(Algorithm.ofMlDsa(akp.level).name());
-            try w.writeAll("\",\"kty\":\"AKP\",\"pub\":\"");
-            try base64url.encode(w, akp.public);
-            try w.writeAll("\"}");
+            try sink.put("{\"alg\":\"");
+            try sink.put(Algorithm.ofMlDsa(akp.level).name());
+            try sink.put("\",\"kty\":\"AKP\",\"pub\":\"");
+            try putEncoded(sink, akp.public);
+            try sink.put("\"}");
         },
         .hmac => |secret| {
-            try w.writeAll("{\"k\":\"");
-            try base64url.encode(w, secret);
-            try w.writeAll("\",\"kty\":\"oct\"}");
+            try sink.put("{\"k\":\"");
+            try putEncoded(sink, secret);
+            try sink.put("\",\"kty\":\"oct\"}");
         },
     }
 }
-
-/// A writer that hashes what is written to it.
-const HashWriter = struct {
-    hash: *std.crypto.hash.sha2.Sha256,
-    writer: std.Io.Writer,
-
-    const vtable: std.Io.Writer.VTable = .{ .drain = drain };
-
-    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-        const self: *HashWriter = @alignCast(@fieldParentPtr("writer", w)); // safe: every HashWriter.writer is its own field
-        self.hash.update(w.buffered());
-        w.end = 0;
-        var written: usize = 0;
-        for (data[0 .. data.len - 1]) |bytes| {
-            self.hash.update(bytes);
-            written += bytes.len;
-        }
-        const last = data[data.len - 1];
-        for (0..splat) |_| self.hash.update(last);
-        return written + last.len * splat;
-    }
-};
 
 test {
     _ = @import("jwk_test.zig");

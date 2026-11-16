@@ -360,9 +360,7 @@ pub const AuthorizationFlow = struct {
     /// `request` and `jkt`, which holds the DPoP thumbprint when there is one.
     fn parameters(flow: *const AuthorizationFlow, request: Begin, jkt: *[43]u8) authorize.Request {
         if (request.dpop) |session| {
-            var jw: std.Io.Writer = .fixed(jkt);
-            // glint-ignore: Z026 -- a SHA-256 is 43 base64url characters
-            clearance.base64url.encode(&jw, &session.thumbprint()) catch unreachable;
+            _ = clearance.base64url.encodeInto(jkt, &session.thumbprint());
         }
         return .{
             .client_id = request.client_id,

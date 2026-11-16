@@ -517,13 +517,13 @@ fn recoverKey(io: std.Io, arena: std.mem.Allocator, key: *const DecryptionKey, a
             var plain_owner: aegis.Secret([cloak.PrivateKey.max_plaintext]u8) = .init(undefined);
             defer plain_owner.deinit();
             const plain = plain_owner.exposeMut();
-            // glint-ignore: Z026 -- a key that does not decrypt leaves the random content key, so a wrong key and a bad tag answer alike (RFC 7516 section 11.5)
-            if (private.decrypt(alg.oaep().?, encrypted_key, noise[0..noise_length], plain)) |content_key| {
-                if (content_key.len == cek.len) {
-                    @memcpy(cek, content_key);
-                    recovered = true;
-                }
-            } else |_| {}
+            // A key that does not decrypt is no content key: the random one
+            // stays, so a wrong key and a bad tag answer alike (RFC 7516 §11.5).
+            const decrypted = private.decrypt(alg.oaep().?, encrypted_key, noise[0..noise_length], plain) catch null;
+            if (decrypted) |content_key| if (content_key.len == cek.len) {
+                @memcpy(cek, content_key);
+                recovered = true;
+            };
         },
         .agreement => recovered = try agreeInto(arena, key, alg, enc, joint, encrypted_key, cek),
         .password => {
@@ -537,7 +537,11 @@ fn recoverKey(io: std.Io, arena: std.mem.Allocator, key: *const DecryptionKey, a
             defer kek_owner.deinit();
             const kek = kek_owner.exposeMut();
             const kek_length = alg.wrapLength().?;
-            try pbes2Key(arena, alg, key.material.password, salt_input, count, kek[0..kek_length]);
+            pbes2Key(arena, alg, key.material.password, salt_input, count, kek[0..kek_length]) catch |err| return switch (err) {
+                error.ScratchTooSmall => error.ScratchTooSmall,
+                // A count or length the header gives that PBKDF2 refuses.
+                error.WeakParameters, error.OutputTooLong => error.InvalidHeader,
+            };
             recovered = unwrapInto(kek[0..kek_length], encrypted_key, cek);
         },
     }
@@ -621,7 +625,11 @@ pub fn concatKdf(z: []const u8, algorithm_id: []const u8, apu: []const u8, apv: 
 
 /// PBES2's key (RFC 7518 §4.8.1.1): PBKDF2 with HMAC-SHA-256 or -512 over the
 /// salt `alg || 0x00 || p2s`.
-fn pbes2Key(arena: std.mem.Allocator, alg: KeyManagement, password: []const u8, p2s: []const u8, count: u32, out: []u8) DecryptError!void {
+/// What PBES2's key derivation refuses: no room for the salt, or a count or
+/// length PBKDF2 will not derive with (a count of zero, a key too long).
+const Pbes2Error = error{ScratchTooSmall} || std.crypto.errors.WeakParametersError || std.crypto.errors.OutputTooLongError;
+
+fn pbes2Key(arena: std.mem.Allocator, alg: KeyManagement, password: []const u8, p2s: []const u8, count: u32, out: []u8) Pbes2Error!void {
     const name = alg.name();
     const salt = arena.alloc(u8, name.len + 1 + p2s.len) catch return error.ScratchTooSmall;
     @memcpy(salt[0..name.len], name);
@@ -631,8 +639,7 @@ fn pbes2Key(arena: std.mem.Allocator, alg: KeyManagement, password: []const u8, 
         .pbes2_hs256_a128kw => std.crypto.pwhash.pbkdf2(out, password, salt, count, std.crypto.auth.hmac.sha2.HmacSha256),
         else => std.crypto.pwhash.pbkdf2(out, password, salt, count, std.crypto.auth.hmac.sha2.HmacSha512),
     };
-    // glint-ignore: Z026 -- the count is at least one and the key at most 32 bytes
-    derived catch unreachable;
+    try derived;
 }
 
 /// Decrypts the content under `cek`, the tag checked first.
@@ -952,8 +959,8 @@ fn wrapKey(gpa: std.mem.Allocator, arena: std.mem.Allocator, draw: Draw, r: Reci
         .direct => {},
         .wrap => {
             out.encrypted_key = try arena.alloc(u8, cek.len + 8);
-            // glint-ignore: Z026 -- a KW secret is 16 or 32 bytes (fitsEncryption) and a content key 16 to 64
-            cloak.cipher.keyWrap.wrap(r.key.key.material.hmac, cek, out.encrypted_key) catch unreachable;
+            // A secret or content key of a length key wrap refuses does not fit.
+            cloak.cipher.keyWrap.wrap(r.key.key.material.hmac, cek, out.encrypted_key) catch return error.InvalidKey;
         },
         .gcm_wrap => {
             const secret = r.key.key.material.hmac;
@@ -988,12 +995,12 @@ fn wrapKey(gpa: std.mem.Allocator, arena: std.mem.Allocator, draw: Draw, r: Reci
             const kek_length = r.alg.wrapLength().?;
             pbes2Key(arena, r.alg, p.password, salt[0..p.salt_length], p.count, kek[0..kek_length]) catch |err| return switch (err) {
                 error.ScratchTooSmall => error.OutOfMemory,
-                // unreachable: pbes2Key fails only for room
-                else => unreachable,
+                // A count or length the recipient's options give that PBKDF2 refuses.
+                error.WeakParameters, error.OutputTooLong => error.InvalidKey,
             };
             out.encrypted_key = try arena.alloc(u8, cek.len + 8);
-            // glint-ignore: Z026 -- the KEK is 16 or 32 bytes and the content key 16 to 64
-            cloak.cipher.keyWrap.wrap(kek[0..kek_length], cek, out.encrypted_key) catch unreachable;
+            // A key encryption key or content key of a length key wrap refuses does not fit.
+            cloak.cipher.keyWrap.wrap(kek[0..kek_length], cek, out.encrypted_key) catch return error.InvalidKey;
             out.p2s = try encodeAlloc(arena, salt[0..p.salt_length]);
             out.p2c = p.count;
         },
@@ -1050,8 +1057,8 @@ fn agreeTo(gpa: std.mem.Allocator, arena: std.mem.Allocator, draw: Draw, r: Reci
     const kek_length = r.alg.wrapLength().?;
     concatKdf(z, r.alg.name(), "", "", kek[0..kek_length]);
     out.encrypted_key = try arena.alloc(u8, cek.len + 8);
-    // glint-ignore: Z026 -- the KEK is 16 or 32 bytes and the content key 16 to 64
-    cloak.cipher.keyWrap.wrap(kek[0..kek_length], cek, out.encrypted_key) catch unreachable;
+    // A key encryption key or content key of a length key wrap refuses does not fit.
+    cloak.cipher.keyWrap.wrap(kek[0..kek_length], cek, out.encrypted_key) catch return error.InvalidKey;
 }
 
 fn encodeAlloc(arena: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.Error![]const u8 {

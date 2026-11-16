@@ -197,12 +197,12 @@ pub const Fields = struct {
 pub fn encodeSecret(gpa: std.mem.Allocator, pairs: []const form.Pair) std.mem.Allocator.Error!aegis.SecretBytes {
     const length: usize = @intCast(form.encodedLength(pairs));
     var body = aegis.SecretBytes.init(gpa, length) catch return error.OutOfMemory;
-    errdefer body.deinit();
-    // glint-ignore: Z026 -- the capacity was just allocated at this length
-    body.resizeWithinCapacity(length) catch unreachable;
-    var w: std.Io.Writer = .fixed(body.exposeMut());
-    // glint-ignore: Z026 -- `encodedLength` is what `encode` writes
-    form.encode(&w, pairs) catch unreachable;
+    errdefer body.deinit(gpa);
+    // Written through the owner's own writer, into the capacity just
+    // allocated: its one failure is an allocation's.
+    var w: aegis.SecretBytes.Writer = .init(&body, gpa);
+    form.encode(&w.interface, pairs) catch return error.OutOfMemory;
+    w.interface.flush() catch return error.OutOfMemory;
     return body;
 }
 

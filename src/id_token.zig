@@ -183,10 +183,7 @@ pub fn accessTokenHash(alg: Algorithm, value: []const u8, out: *[43]u8) []const 
             break :blk 32;
         },
     };
-    var w: std.Io.Writer = .fixed(out);
-    // glint-ignore: Z026 -- at most 32 bytes encode to at most 43 characters
-    base64url.encode(&w, digest[0..half]) catch unreachable;
-    return w.buffered();
+    return base64url.encodeInto(out, digest[0..half]);
 }
 
 const testing = std.testing;

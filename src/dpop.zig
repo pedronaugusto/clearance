@@ -76,9 +76,7 @@ pub fn writeProof(gpa: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, key: 
 }
 
 fn encodeInto(out: []u8, bytes: []const u8) void {
-    var w: std.Io.Writer = .fixed(out);
-    // glint-ignore: Z026 -- `out` is `encodedLength(bytes.len)` long
-    base64url.encode(&w, bytes) catch unreachable;
+    _ = base64url.encodeInto(out, bytes);
 }
 
 /// The hash a proof carries of an access token (`ath`): SHA-256 of its

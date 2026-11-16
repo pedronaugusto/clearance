@@ -30,6 +30,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `base64url.encodeInto(out, bytes)`: the encoding written into the start of `out`, which holds `encodedLength(bytes.len)` bytes, with no writer and nothing to fail.
 - A property for the Design's "the verifier picks the key": over keys of any kids and algorithms and tokens signed by any of them, a token verifies exactly when its algorithm is one the verifier names, its `kid` (or, without one, its algorithm alone) leaves one key that fits, and that key signed it. It fails on each of three planted faults (a key's own `alg` ignored, the first of two candidates taken, the header's `kid` ignored).
 
 - `clearance.time`: a timestamp's NumericDate (RFC 7519 §2) as aegis's `Instant(.real, .second, i64)`, which every claim check reads `now` through.
@@ -52,6 +53,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Pins aegis f52eabe, still 0.2.4, the one aegis the family builds on, and on it strand 8155bf9, cloak 44151e7 and uplink cd13bdc; development on preflight's ci-standard 158c176 and shakedown c29751d.
+- `jwe.encrypt`: a recipient whose secret, key encryption key or PBES2 count key wrap or PBKDF2 refuses is `error.InvalidKey`; `jwe.decrypt`: a `p2c` PBKDF2 refuses is `error.InvalidHeader`. Both trapped before.
 - Development on preflight's ci-standard f991816 and shakedown 327bc61, whose fuzz runner takes the options preflight passes it.
 - Pins aegis c8982a8, still 0.2.4: six additive commits after 3c0b13e (the role declarations a linter reads, `lint_rules`), the aegis the development build's preflight selects. Nothing clearance calls changed.
 - aegis 0.3: a remote key set's wait for its fetch is its guard's (`guard.wait(&condition, io, .none)`). Pins aegis breaking-0.3 (a34e694), and on it strand (cc6918d), cloak (5103da0), uplink main (a051420) and shakedown main (4979fa9), the commits relic main pins.

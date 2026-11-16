@@ -270,8 +270,8 @@ fn blank(text: []const u8) bool {
 
 /// Whether `raw` is `resource` alone: the string, or an array of it alone.
 fn soleResource(arena: std.mem.Allocator, raw: strand.json.Raw, resource: []const u8) bool {
-    // glint-ignore: Z026 -- a value that is no string is read as an array below
-    if (raw.parse([]const u8, arena, .{})) |one| return std.mem.eql(u8, one, resource) else |_| {}
+    // A value that is no string is read as an array below.
+    if (raw.parse([]const u8, arena, .{}) catch null) |one| return std.mem.eql(u8, one, resource);
     const many = raw.parse([]const []const u8, arena, .{}) catch return false;
     return many.len == 1 and std.mem.eql(u8, many[0], resource);
 }

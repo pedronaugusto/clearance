@@ -349,10 +349,8 @@ pub fn numericDate(bytes: []const u8) error{InvalidClaims}!i64 {
     const text = std.mem.trim(u8, bytes, " \t\r\n");
     if (text.len == 0 or text.len > 32) return error.InvalidClaims;
     if (text[0] != '-' and !std.ascii.isDigit(text[0])) return error.InvalidClaims;
-    // glint-ignore: Z026 -- a value that is no integer is read as a JSON number below
-    if (std.fmt.parseInt(i64, text, 10)) |seconds| {
-        return seconds;
-    } else |_| {}
+    // A value that is no integer is read as a JSON number below.
+    if (std.fmt.parseInt(i64, text, 10) catch null) |seconds| return seconds;
     const value = std.fmt.parseFloat(f64, text) catch return error.InvalidClaims;
     if (!std.math.isFinite(value) or @abs(value) > 1e15) return error.InvalidClaims;
     return @intFromFloat(@floor(value));

@@ -36,9 +36,7 @@ pub fn challengeOf(verifier: []const u8) [length]u8 {
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(verifier, &digest, .{});
     var out: [length]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&out);
-    // glint-ignore: Z026 -- 32 bytes encode to exactly `length` characters
-    base64url.encode(&w, &digest) catch unreachable;
+    _ = base64url.encodeInto(&out, &digest);
     return out;
 }
 
@@ -48,9 +46,7 @@ pub fn random(io: std.Io, out: *[length]u8) void {
     defer bytes_owner.deinit();
     const bytes = bytes_owner.exposeMut();
     io.random(bytes);
-    var w: std.Io.Writer = .fixed(out);
-    // glint-ignore: Z026 -- 32 bytes encode to exactly `length` characters
-    base64url.encode(&w, bytes) catch unreachable;
+    _ = base64url.encodeInto(out, bytes);
 }
 
 /// Whether two values a peer echoes (a `state`, a `nonce`) are the same, in
