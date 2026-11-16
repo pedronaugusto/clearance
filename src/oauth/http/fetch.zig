@@ -189,7 +189,7 @@ pub fn postJson(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, target
 fn post(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, target: []const u8, headers: []const uplink.Header, body: []const u8, limit: Bytes, options: Options) Error!SecretAnswer {
     _ = url.endpoint(target) catch return error.InvalidEndpoint;
     var response = try send(http, io, .{
-        .method = .POST,
+        .method = .post,
         .url = target,
         .headers = headers,
         .body = .{ .bytes = body },

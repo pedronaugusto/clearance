@@ -1027,9 +1027,7 @@ fn agreeTo(gpa: std.mem.Allocator, arena: std.mem.Allocator, draw: Draw, r: Reci
     };
     var ephemeral = try draw.ephemeral(gpa, curve);
     defer ephemeral.deinit();
-    var info: [cloak.PrivateKey.max_public_key_info]u8 = undefined;
-    // glint-ignore: Z026 -- cloak reads back the key info it writes
-    const public = cloak.certificates.certificate.parsePublicKey(ephemeral.publicKeyInfo(&info)) catch unreachable;
+    const public = ephemeral.publicKey();
     const epk: Key = .{
         .material = switch (public) {
             .ec => |ec| .{ .ec = .{ .curve = ec.curve, .point = ec.bytes } },

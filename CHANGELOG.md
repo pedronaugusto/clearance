@@ -54,6 +54,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - Pins aegis f52eabe, still 0.2.4, the one aegis the family builds on, and on it strand 8155bf9, cloak 44151e7 and uplink cd13bdc; development on preflight's ci-standard 158c176 and shakedown c29751d.
+- Pins strand cb3d74c, cloak c2c4988 and uplink e3cd60c, still on aegis f52eabe: a token request is sent with uplink's `Method.post`, and an ECDH-ES encryption takes its ephemeral key's public half from cloak's `PrivateKey.publicKey`, where it wrote the key out and read it back.
 - `jwe.encrypt`: a recipient whose secret, key encryption key or PBES2 count key wrap or PBKDF2 refuses is `error.InvalidKey`; `jwe.decrypt`: a `p2c` PBKDF2 refuses is `error.InvalidHeader`. Both trapped before.
 - Development on preflight's ci-standard f991816 and shakedown 327bc61, whose fuzz runner takes the options preflight passes it.
 - Pins aegis c8982a8, still 0.2.4: six additive commits after 3c0b13e (the role declarations a linter reads, `lint_rules`), the aegis the development build's preflight selects. Nothing clearance calls changed.

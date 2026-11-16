@@ -35,11 +35,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "clearance", .module = clearance },
         },
     });
-    // glint-ignore: Z026 -- a lazy dependency not fetched yet adds no imports: the build fetches it and runs again
     if (b.dependencyLazy("uplink", .{ .target = target, .optimize = optimize })) |uplink| {
         oauth.addImport("uplink.wire", uplink.module("uplink.wire"));
         oauth.addImport("uplink", uplink.module("uplink"));
-    } else |_| {}
+    } else |err| std.log.debug("uplink not fetched yet ({t}): the build fetches it and configures again", .{err});
 }
 
 /// clearance's development: its tests, its properties, the example and the
@@ -72,8 +71,7 @@ pub fn dev(b: *std.Build, tools: type) void {
     const properties_step = b.step("properties", "Run the properties alone");
     properties_step.dependOn(&b.addRunArtifact(properties).step);
     check.dependOn(&properties.step);
-    // glint-ignore: Z026 -- a lazy dependency not fetched yet ends this configure pass; the build fetches it and configures again
-    const uplink_package = p.dependencyLazy("uplink", .{ .target = target, .optimize = optimize }) catch return;
+    const uplink_package = p.dependency("uplink", .{ .target = target, .optimize = optimize });
     const oauth_tests = suite(b, "clearance-oauth-tests", "clearance.oauth", target, optimize, filters);
     const oauth_run = b.addRunArtifact(oauth_tests);
     oauth_run.step.dependOn(&tests_run.step);

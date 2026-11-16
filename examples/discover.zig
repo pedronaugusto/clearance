@@ -12,7 +12,7 @@ pub fn main(init: std.process.Init) !void {
     var out_buffer: [1024]u8 = undefined;
     var out = std.Io.File.stdout().writer(io, &out_buffer);
     const w = &out.interface;
-    defer w.flush() catch {}; // glint-ignore: Z026 -- a closed stdout leaves nothing to report to
+    defer w.flush() catch |err| std.log.debug("stdout not flushed: {t}", .{err});
     if (args.len < 2) return w.writeAll("usage: discover <issuer>...\n");
     var http: uplink.Client = .init(gpa, .{});
     defer http.deinit(io);
