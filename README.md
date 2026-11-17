@@ -26,10 +26,10 @@ Work in progress toward the public cut.
 
 Requires Zig 0.17.0. Fetch with `zig fetch --save
 git+https://github.com/pedronaugusto/clearance`, then take the modules through
-`b.dependency` and add them to your executable's imports. A project that
-verifies and signs tokens takes `clearance` and fetches no uplink; one that
-speaks OAuth asks for it, `b.dependency("clearance", .{ .oauth = true })`, and
-takes `clearance.oauth` too (uplink is fetched then).
+`b.dependency` and add them to your executable's imports: `clearance` for
+JWT and JOSE, and `clearance.oauth` too for OAuth 2.1. clearance has no build
+options; uplink, which `clearance.oauth` speaks HTTP through, is fetched with
+it and compiled only in a program that imports `clearance.oauth`.
 
 ## Stability
 

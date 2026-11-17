@@ -21,16 +21,16 @@
         },
 
         .strand = .{
-            .url = "git+https://github.com/pedronaugusto/strand#cb3d74c1d706376899172b921459f99958bb3159",
-            .hash = "strand-0.15.0-8LNWVs2dNwAUUxHJE0TrcXd-rO4EGm7paRc3lKe1ppzt",
+            .url = "git+https://github.com/pedronaugusto/strand#7658e111b4cfe55c0ca8c0cd38ffe3f84aca0c07",
+            .hash = "strand-0.15.0-8LNWVjZmMgCZ_nUQh6qOGakZj0P6EqUAxoI4EmnAifjr",
         },
         .cloak = .{
             .url = "git+https://github.com/pedronaugusto/cloak#c2c498889ba466a78a31a08befd90a2db78519be",
             .hash = "cloak-0.23.1-9onwcQIsXAQ1UscA7lpq4OrC2wh6eKrBbAQn7TLGSHKG",
         },
         .uplink = .{
-            .url = "git+https://github.com/pedronaugusto/uplink#e3cd60c58605b738c46b7e422c0e475afee33c1c",
-            .hash = "uplink-0.10.2-0eVSJgi2HgAcbj3U8OV7T4bs5-JxtGE2YVAR4RgX9GWG",
+            .url = "git+https://github.com/pedronaugusto/uplink#51e2436292a06b6d5351a625c6ac4fdc060d0450",
+            .hash = "uplink-0.10.2-0eVSJvm1HgAUfb0gFpU4sETXCtpFT8EPUnAWmREXUSGq",
             .lazy = true,
         },
     },

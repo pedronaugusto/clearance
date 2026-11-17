@@ -1,13 +1,14 @@
 const std = @import("std");
 
 /// What a project that depends on clearance builds: `clearance`, JWT and
-/// JOSE, on std, aegis, strand and cloak alone; with `oauth` set,
-/// `clearance.oauth`, OAuth 2.1 on uplink, which is fetched only then: a
-/// project that verifies and signs tokens fetches no uplink.
+/// JOSE, on std, aegis, strand and cloak alone, and `clearance.oauth`, OAuth
+/// 2.1 on uplink, a lazy dependency: uplink is fetched with clearance and
+/// compiled only in a program that imports `clearance.oauth`. No build
+/// option: a library takes every dependency with its default options, so
+/// every project reaching clearance builds the same one.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const with_oauth = b.option(bool, "oauth", "Build clearance.oauth, OAuth 2.1 on uplink, which fetches uplink") orelse false;
     const aegis = b.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis");
     const strand = b.dependency("strand", .{ .target = target, .optimize = optimize }).module("strand");
     const cloak = b.dependency("cloak", .{ .target = target, .optimize = optimize }).module("cloak");
@@ -21,7 +22,6 @@ pub fn build(b: *std.Build) void {
             .{ .name = "cloak", .module = cloak },
         },
     });
-    if (!with_oauth) return;
     // Declared before uplink is fetched: a consumer's first pass must find
     // the module it asks for, and only learns here what to fetch.
     const oauth = b.addModule("clearance.oauth", .{
@@ -47,7 +47,7 @@ pub fn dev(b: *std.Build, tools: type) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const test_filter = b.option([]const u8, "test-filter", "Select tests by name");
-    const package = b.dependency("clearance", .{ .target = target, .optimize = optimize, .oauth = true });
+    const package = b.dependency("clearance", .{ .target = target, .optimize = optimize });
     const p = package.builder;
     const module = package.module("clearance");
     const aegis = p.dependency("aegis", .{ .target = target, .optimize = optimize });
@@ -135,15 +135,16 @@ pub fn dev(b: *std.Build, tools: type) void {
             .optimize = optimize,
         },
     });
-    // A project that depends on clearance by path for JWT alone, with only
-    // aegis, strand and cloak to fetch: what a JWT user gets, no uplink.
-    tools.preflight.addConsumerCheck(b, p, .{ .package = "clearance", .program = p.path("ci/consumer.zig"), .packages = &.{ aegis, strand, cloak }, .modules = &.{"clearance"} });
+    // A project that depends on clearance by path for JWT alone: uplink is
+    // fetched with clearance and never compiled, since the program does not
+    // import `clearance.oauth`.
+    tools.preflight.addConsumerCheck(b, p, .{ .package = "clearance", .program = p.path("ci/consumer.zig"), .packages = &.{ aegis, strand, cloak, uplink_package }, .modules = &.{"clearance"} });
 }
 
 /// The tests run in the module itself (`clearance` or `clearance.oauth`),
 /// which gets shakedown for them, so a test binary holds one clearance.
 fn suite(b: *std.Build, name: []const u8, root: []const u8, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, filters: []const []const u8) *std.Build.Step.Compile {
-    const module = b.dependency("clearance", .{ .target = target, .optimize = optimize, .oauth = true }).module(root);
+    const module = b.dependency("clearance", .{ .target = target, .optimize = optimize }).module(root);
     if (module.import_table.get("shakedown") == null) {
         module.addImport("shakedown", b.dependency("shakedown", .{ .target = target, .optimize = optimize }).module("shakedown"));
     }
@@ -155,7 +156,7 @@ fn suite(b: *std.Build, name: []const u8, root: []const u8, target: std.Build.Re
 /// time the Debug module. `b` is the development build; preflight adds
 /// shakedown.
 fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
-    const package = b.dependency("clearance", .{ .target = target, .optimize = optimize, .oauth = true });
+    const package = b.dependency("clearance", .{ .target = target, .optimize = optimize });
     return b.allocator.dupe(std.Build.Module.Import, &.{
         .{ .name = "clearance", .module = package.module("clearance") },
         .{ .name = "clearance.oauth", .module = package.module("clearance.oauth") },
