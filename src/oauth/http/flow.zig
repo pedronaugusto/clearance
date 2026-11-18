@@ -520,15 +520,21 @@ pub const DeviceFlow = struct {
     };
 
     /// Polls at the interval until the person has finished: the tokens, or
-    /// the server's refusal. Each wait is `io`'s sleep, so canceling the
-    /// task ends it.
+    /// the server's refusal. At least the interval passes on the awake clock
+    /// before each request (RFC 8628 §3.5). Each wait is `io`'s sleep, so
+    /// canceling the task ends it.
     pub fn wait(flow: *DeviceFlow, gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, server: *const Server, client: Client, options: TokenOptions) WaitError!token.Response {
         while (true) {
             const now = std.Io.Clock.real.now(io);
             const seconds: i64 = time.unixSeconds(now);
             // A request after the codes expired would only be refused.
             if (seconds +| @as(i64, flow.authorization.interval) >= flow.authorization.expires_at) return error.Expired;
-            try io.sleep(aegis.units.Duration(.second, u32).fromRaw(flow.authorization.interval).toIoDuration(), .awake);
+            const interval = aegis.units.Duration(.second, u32).fromRaw(flow.authorization.interval).toIoDuration();
+            const due: std.Io.Clock.Timestamp = .fromNow(io, .{ .raw = interval, .clock = .awake });
+            // A timed wait may end before its deadline by a timer tick
+            // (Windows times it on interrupt time, not on the awake clock),
+            // so the clock decides when the interval has passed.
+            while (std.Io.Clock.awake.now(io).compare(.lt, due.raw)) try due.wait(io);
             switch (try flow.poll(gpa, io, http, server, client, options)) {
                 .tokens => |t| return .{ .tokens = t },
                 .refused => |e| return .{ .refused = e },

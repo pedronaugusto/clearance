@@ -653,6 +653,51 @@ test "device authorization: the codes shown, polled through pending and slow_dow
     try testing.expectEqual(@as(u32, 2), p.device_polls);
 }
 
+/// `testing.io` with timed waits that end halfway to their deadline, as a
+/// wait can end early (Windows times one on interrupt time, a tick apart
+/// from the awake clock).
+const EarlyWake = struct {
+    var base: Io = undefined;
+    var vtable: Io.VTable = undefined;
+
+    fn io() Io {
+        base = testing.io;
+        vtable = base.vtable.*;
+        vtable.sleep = sleep;
+        return .{ .userdata = base.userdata, .vtable = &vtable };
+    }
+
+    fn sleep(userdata: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
+        const left = timeout.toDurationFromNow(base) orelse return base.vtable.sleep(userdata, timeout);
+        const half: Io.Duration = .fromNanoseconds(@divTrunc(@max(left.raw.nanoseconds, 0), 2));
+        return base.vtable.sleep(userdata, .{ .duration = .{ .raw = half, .clock = left.clock } });
+    }
+};
+
+test "device authorization: the interval passes on the awake clock when a timed wait ends early" {
+    const gpa = testing.allocator;
+    var p: Provider = undefined;
+    try p.start(testing.io);
+    defer p.stop(testing.io);
+    var http: uplink.Client = .init(gpa, .{});
+    defer http.deinit(testing.io);
+    var server = try oauth.discover(gpa, testing.io, &http, p.base, .{});
+    defer server.deinit();
+    const client: oauth.Client = .{ .id = "tv-app" };
+
+    p.device_answers = &.{ "{\"error\":\"authorization_pending\"}", "{\"access_token\":\"dev-at\",\"token_type\":\"Bearer\"}" };
+    var begun = try oauth.DeviceFlow.begin(gpa, testing.io, &http, &server.value, client, .{}, .{});
+    defer begun.flow.deinit();
+    const early = EarlyWake.io();
+    const started = Io.Clock.awake.now(testing.io);
+    var waited = try begun.flow.wait(gpa, early, &http, &server.value, client, .{});
+    defer waited.tokens.deinit();
+    try testing.expectEqualStrings("dev-at", waited.tokens.access_token);
+    // Two polls, each after a full second.
+    try testing.expect(started.durationTo(Io.Clock.awake.now(testing.io)).toMilliseconds() >= 2000);
+    try testing.expectEqual(@as(u32, 2), p.device_polls);
+}
+
 test "device authorization: a refusal ends the wait, and codes about to expire are not polled" {
     const gpa = testing.allocator;
     const io = testing.io;
