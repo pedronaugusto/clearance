@@ -175,6 +175,10 @@ user's token at an enterprise's identity provider for an ID-JAG, and
   refresh tokens) and token sets live in aegis secret memory; `state` and
   `nonce` compare in constant time.
 
+[docs/design.md](docs/design.md) holds the whole design: the modules and
+layers, the scope and what is out, each decision with its reason, and the
+evidence.
+
 ## Scope
 
 In this release: JWS compact serialization with HS256/384/512, RS256/384/512,
