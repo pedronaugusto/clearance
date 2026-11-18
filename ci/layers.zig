@@ -54,6 +54,7 @@ const package_references = [_]gantry.rules.ReferenceRule{
         "uplink.wire",
         "uplink",
         "shakedown",
+        "testdata",
         "clearance",
         "preflight_bench_options",
     } },

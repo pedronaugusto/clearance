@@ -148,6 +148,10 @@ fn suite(b: *std.Build, name: []const u8, root: []const u8, target: std.Build.Re
     if (module.import_table.get("shakedown") == null) {
         module.addImport("shakedown", b.dependency("shakedown", .{ .target = target, .optimize = optimize }).module("shakedown"));
     }
+    // The vectors the tests read, outside src/ and the paths a project fetches.
+    if (module.import_table.get("testdata") == null) {
+        module.addImport("testdata", b.createModule(.{ .root_source_file = module.owner.path("testdata/root.zig") }));
+    }
     return b.addTest(.{ .name = name, .filters = filters, .root_module = module });
 }
 

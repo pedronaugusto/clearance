@@ -1,4 +1,5 @@
 const std = @import("std");
+const testdata = @import("testdata");
 const cloak = @import("cloak");
 const jws = @import("jws.zig");
 const jwk = @import("jwk.zig");
@@ -11,7 +12,7 @@ const all = std.enums.values(Algorithm);
 /// The cookbook's key for a vector, public members only.
 fn cookbookKey(comptime file: []const u8) !jwk.KeySet {
     const Doc = struct { input: struct { key: std.json.Value } };
-    const doc = try std.json.parseFromSlice(Doc, gpa, @embedFile("testing/vectors/rfc7520/" ++ file), .{ .ignore_unknown_fields = true });
+    const doc = try std.json.parseFromSlice(Doc, gpa, testdata.file("vectors/rfc7520/" ++ file), .{ .ignore_unknown_fields = true });
     defer doc.deinit();
     var key = doc.value.input.key.object;
     inline for (.{ "d", "p", "q", "dp", "dq", "qi" }) |private| _ = key.swapRemove(private);
@@ -22,7 +23,7 @@ fn cookbookKey(comptime file: []const u8) !jwk.KeySet {
 
 fn cookbookCompact(comptime file: []const u8, out: []u8) ![]const u8 {
     const Doc = struct { output: struct { compact: []const u8 } };
-    const doc = try std.json.parseFromSlice(Doc, gpa, @embedFile("testing/vectors/rfc7520/" ++ file), .{ .ignore_unknown_fields = true });
+    const doc = try std.json.parseFromSlice(Doc, gpa, testdata.file("vectors/rfc7520/" ++ file), .{ .ignore_unknown_fields = true });
     defer doc.deinit();
     @memcpy(out[0..doc.value.output.compact.len], doc.value.output.compact);
     return out[0..doc.value.output.compact.len];
@@ -92,7 +93,7 @@ test "RFC 8037 A.4 and A.5: Ed25519 signs the example to the RFC's bytes and ver
 /// The cookbook's key for a vector as the file has it, private members and all.
 fn cookbookPrivate(comptime file: []const u8) !jwk.PrivateKey {
     const Doc = struct { input: struct { key: std.json.Value } };
-    const doc = try std.json.parseFromSlice(Doc, gpa, @embedFile("testing/vectors/rfc7520/" ++ file), .{ .ignore_unknown_fields = true });
+    const doc = try std.json.parseFromSlice(Doc, gpa, testdata.file("vectors/rfc7520/" ++ file), .{ .ignore_unknown_fields = true });
     defer doc.deinit();
     const text = try std.json.Stringify.valueAlloc(gpa, doc.value.input.key, .{});
     defer gpa.free(text);
@@ -200,7 +201,7 @@ test "a private JWK is refused for what it is, each by its error" {
 test "an RSA private JWK without its CRT members, or with more primes, is not one clearance signs with" {
     const Doc = struct { input: struct { key: std.json.Value } };
     inline for (.{ "p", "oth" }) |change| {
-        const doc = try std.json.parseFromSlice(Doc, gpa, @embedFile("testing/vectors/rfc7520/4_1.rsa_v15_signature.json"), .{ .ignore_unknown_fields = true });
+        const doc = try std.json.parseFromSlice(Doc, gpa, testdata.file("vectors/rfc7520/4_1.rsa_v15_signature.json"), .{ .ignore_unknown_fields = true });
         defer doc.deinit();
         var key = doc.value.input.key.object;
         if (comptime std.mem.eql(u8, change, "p")) _ = key.swapRemove("p") else try key.put(doc.arena.allocator(), "oth", .{ .integer = 1 });
@@ -344,7 +345,7 @@ test "an external signer signs what clearance built, and its token verifies" {
 const MlDsaExample = struct { jwk: std.json.Value, jws: []const u8, raw_to_be_signed: []const u8, raw_signature: []const u8 };
 
 fn mldsaExample(comptime name: []const u8) !std.json.Parsed(MlDsaExample) {
-    return std.json.parseFromSlice(MlDsaExample, gpa, @embedFile("testing/vectors/rfc9964/a_1." ++ name ++ ".json"), .{ .ignore_unknown_fields = true });
+    return std.json.parseFromSlice(MlDsaExample, gpa, testdata.file("vectors/rfc9964/a_1." ++ name ++ ".json"), .{ .ignore_unknown_fields = true });
 }
 
 fn jsonText(value: std.json.Value) ![]u8 {

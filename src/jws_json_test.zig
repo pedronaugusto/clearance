@@ -2,6 +2,7 @@
 //! (RFC 7797): the JOSE cookbook's (RFC 7520 §4.4 to §4.8) and RFC 7797
 //! §4's examples, byte for byte where the signature is deterministic.
 const std = @import("std");
+const testdata = @import("testdata");
 const jws = @import("jws.zig");
 const jwk = @import("jwk.zig");
 const base64url = @import("base64url.zig");
@@ -21,7 +22,7 @@ const Vector = struct {
 
     fn load(comptime file: []const u8) !Vector {
         const Doc = struct { input: struct { key: std.json.Value }, output: struct { compact: ?[]const u8 = null, json: ?std.json.Value = null, json_flat: ?std.json.Value = null } };
-        const doc = try std.json.parseFromSlice(Doc, gpa, @embedFile("testing/vectors/rfc7520/" ++ file), .{ .ignore_unknown_fields = true });
+        const doc = try std.json.parseFromSlice(Doc, gpa, testdata.file("vectors/rfc7520/" ++ file), .{ .ignore_unknown_fields = true });
         defer doc.deinit();
         var key = doc.value.input.key.object;
         inline for (.{ "d", "p", "q", "dp", "dq", "qi" }) |private| _ = key.swapRemove(private);
@@ -120,7 +121,7 @@ test "RFC 7520 4.7: alg in the unprotected header alone is refused, by decision"
 
 test "RFC 7520 4.8: three signatures, each verified by its own key, the one with an unprotected alg never" {
     const Doc = struct { input: struct { key: []const std.json.Value }, output: struct { json: std.json.Value } };
-    const doc = try std.json.parseFromSlice(Doc, gpa, @embedFile("testing/vectors/rfc7520/4_8.multiple_signatures.json"), .{ .ignore_unknown_fields = true });
+    const doc = try std.json.parseFromSlice(Doc, gpa, testdata.file("vectors/rfc7520/4_8.multiple_signatures.json"), .{ .ignore_unknown_fields = true });
     defer doc.deinit();
     const document = try std.json.Stringify.valueAlloc(gpa, doc.value.output.json, .{});
     defer gpa.free(document);

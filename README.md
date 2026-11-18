@@ -31,6 +31,10 @@ JWT and JOSE, and `clearance.oauth` too for OAuth 2.1. clearance has no build
 options; uplink, which `clearance.oauth` speaks HTTP through, is fetched with
 it and compiled only in a program that imports `clearance.oauth`.
 
+The package a project fetches is clearance's build files and Zig sources: 206 KB compressed,
+0.9 MiB unpacked. Its test data (the JOSE cookbook, RFC 9964's examples and Wycheproof's JOSE
+files) stays in the repository under `testdata/`.
+
 ## Stability
 
 clearance is 0.x and tracks Zig 0.17.x. A breaking change comes only in a minor release

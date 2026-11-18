@@ -1,4 +1,5 @@
 const std = @import("std");
+const testdata = @import("testdata");
 const jwk = @import("jwk.zig");
 const base64url = @import("base64url.zig");
 
@@ -32,7 +33,7 @@ test "RFC 7638 3.1 and RFC 8037 A.3: thumbprints of an RSA and an Ed25519 key" {
 }
 
 test "RFC 7520 3.3: the cookbook's RSA public key is read with its kid and use" {
-    var set = try jwk.KeySet.parse(gpa, @embedFile("testing/vectors/rfc7520/3_3.rsa_public_key.json"), .{});
+    var set = try jwk.KeySet.parse(gpa, testdata.file("vectors/rfc7520/3_3.rsa_public_key.json"), .{});
     defer set.deinit();
     try std.testing.expectEqual(@as(usize, 1), set.keys.len);
     try std.testing.expectEqualStrings("bilbo.baggins@hobbiton.example", set.keys[0].kid.?);
@@ -40,7 +41,7 @@ test "RFC 7520 3.3: the cookbook's RSA public key is read with its kid and use" 
 }
 
 test "RFC 7520 3.1: a P-521 key is read, its 66-byte coordinates one SEC 1 point" {
-    var set = try jwk.KeySet.parse(gpa, @embedFile("testing/vectors/rfc7520/3_1.ec_public_key.json"), .{});
+    var set = try jwk.KeySet.parse(gpa, testdata.file("vectors/rfc7520/3_1.ec_public_key.json"), .{});
     defer set.deinit();
     try std.testing.expectEqual(@as(usize, 1), set.keys.len);
     try std.testing.expectEqual(@as(u16, 0), set.skipped.get(.unsupported));

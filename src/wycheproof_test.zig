@@ -3,6 +3,7 @@
 //! clearance has allowed, and must be accepted exactly when the file says
 //! `valid`.
 const std = @import("std");
+const testdata = @import("testdata");
 const jws = @import("jws.zig");
 const jwk = @import("jwk.zig");
 const Algorithm = @import("Algorithm.zig").Algorithm;
@@ -41,7 +42,7 @@ fn campaign(comptime file: []const u8) !Outcome {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    const root = try std.json.parseFromSliceLeaky(std.json.Value, a, @embedFile("testing/vectors/wycheproof/" ++ file), .{});
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, a, testdata.file("vectors/wycheproof/" ++ file), .{});
     var outcome: Outcome = .{};
     for (root.object.get("testGroups").?.array.items) |group| {
         const key_json = group.object.get("public") orelse group.object.get("private").?;

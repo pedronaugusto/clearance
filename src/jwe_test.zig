@@ -1,9 +1,10 @@
 //! JWE against the JOSE cookbook (RFC 7520 §5, ietf-jose/cookbook at the
-//! commit `testing/vectors/provenance.txt` names) and Wycheproof's
+//! commit `testdata/vectors/provenance.txt` names) and Wycheproof's
 //! json_web_encryption file: every example decrypted in every serialization
 //! it is written in, the reproducible ones encrypted byte for byte, and the
 //! refusals the safe subset makes.
 const std = @import("std");
+const testdata = @import("testdata");
 const jwe = @import("jwe.zig");
 const jwk = @import("jwk.zig");
 const Key = @import("Key.zig");
@@ -52,7 +53,7 @@ const Vector = struct {
     fn load(comptime name: []const u8) !Vector {
         var arena: std.heap.ArenaAllocator = .init(gpa);
         errdefer arena.deinit();
-        const root = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), @embedFile("testing/vectors/rfc7520/" ++ name), .{});
+        const root = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), testdata.file("vectors/rfc7520/" ++ name), .{});
         return .{ .arena = arena, .root = root };
     }
 
@@ -322,7 +323,7 @@ test "JWE: Wycheproof json_web_encryption: valid tokens decrypt, invalid ones ar
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const file = try std.json.parseFromSliceLeaky(WycheproofFile, arena, @embedFile("testing/vectors/wycheproof/json_web_encryption_test.json"), .{ .ignore_unknown_fields = true });
+    const file = try std.json.parseFromSliceLeaky(WycheproofFile, arena, testdata.file("vectors/wycheproof/json_web_encryption_test.json"), .{ .ignore_unknown_fields = true });
     var ran: usize = 0;
     var not_offered: usize = 0;
     for (file.testGroups) |g| {

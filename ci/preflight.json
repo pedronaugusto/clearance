@@ -8,9 +8,7 @@
     "src/oauth/tests.zig",
     "src/oauth/property_test.zig"
   ],
-  "test_support": [
-    "src/testing/**"
-  ],
+  "test_support": [],
   "test_dependencies": [
     "shakedown"
   ],
