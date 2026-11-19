@@ -68,6 +68,33 @@ test "RFC 7520 4.4: HS256 in both JSON serializations verifies, and is written b
     try testing.expectEqualStrings(v.json.?, out.written());
 }
 
+test "signatures selects the general syntax, whose top-level signature, protected and header are ignored (RFC 7515 §7.2.1)" {
+    var v = try Vector.load("4_4.hmac-sha2_integrity_protection.json");
+    defer v.deinit();
+    const general = v.json.?;
+    // Members the general syntax does not define, beside `signatures`: another
+    // signature, a protected `alg` of none, an unprotected header, of any type.
+    const extras = [_][]const u8{
+        "\"signature\":\"AAAA\",\"protected\":\"eyJhbGciOiJub25lIn0\",\"header\":{\"alg\":\"none\",\"kid\":\"other\"},",
+        "\"signature\":7,\"protected\":[],\"header\":\"x\",",
+    };
+    for (extras) |extra| {
+        const document = try std.mem.concat(gpa, u8, &.{ "{", extra, general[1..] });
+        defer gpa.free(document);
+        const scratch = try gpa.alloc(u8, jws.scratchLengthJson(document.len, 0));
+        defer gpa.free(scratch);
+        const verified = try jws.verifyJson(document, v.set.keys, .{ .algorithms = &.{.hs256} }, scratch);
+        try testing.expectEqualStrings(cookbook_payload, verified.payload);
+        try testing.expectEqualStrings("018c0ae5-4d9b-471b-bfd6-eef314bc7037", verified.header.kid.?);
+        try testing.expectEqual(@as(usize, 0), verified.index);
+    }
+    // Without `signatures` the document is flattened, and those members are its signature's.
+    const flat = "{\"payload\":\"cA\",\"protected\":\"eyJhbGciOiJIUzI1NiJ9\",\"signature\":7}";
+    const scratch = try gpa.alloc(u8, jws.scratchLengthJson(flat.len, 0));
+    defer gpa.free(scratch);
+    try testing.expectError(error.Malformed, jws.verifyJson(flat, v.set.keys, .{ .algorithms = &.{.hs256} }, scratch));
+}
+
 test "RFC 7520 4.5: a detached payload, compact and JSON, verifies with the payload given and is written byte for byte" {
     var v = try Vector.load("4_5.signature_with_detached_content.json");
     defer v.deinit();
@@ -231,7 +258,6 @@ test "headers RFC 7515 and 7797 forbid are refused, whatever the signature" {
     try testing.expectError(error.NoKey, jws.verifyJson(good.written(), set.keys, .{ .algorithms = &.{.hs256} }, scratch));
     const shapes = [_][]const u8{
         "{\"payload\":\"cA\",\"signatures\":[],\"x\":1}",
-        "{\"payload\":\"cA\",\"signatures\":[{\"protected\":\"eyJhbGciOiJIUzI1NiJ9\",\"signature\":\"AA\"}],\"signature\":\"AA\"}",
         "{\"payload\":\"cA\"}",
         "[]",
         "{\"payload\":\"cA\",\"protected\":\"eyJhbGciOiJIUzI1NiJ9\",\"signature\":\"AA\",\"payload\":\"cB\"}",

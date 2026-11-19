@@ -474,10 +474,20 @@ const WireSignature = struct {
 const WireDocument = struct {
     payload: ?[]const u8 = null,
     signatures: ?[]const WireSignature = null,
-    protected: ?[]const u8 = null,
+    /// Read only in the flattened syntax: beside `signatures` they are
+    /// members the general syntax does not define, ignored, so held as raw
+    /// JSON and read only when used.
+    protected: ?strand.json.Raw = null,
     header: ?strand.json.Raw = null,
-    signature: ?[]const u8 = null,
+    signature: ?strand.json.Raw = null,
 };
+
+/// A top-level member only the flattened syntax reads, as the JSON string it
+/// must be there.
+fn flatString(arena: std.mem.Allocator, member: ?strand.json.Raw) error{Malformed}!?[]const u8 {
+    const raw = member orelse return null;
+    return strand.json.parseLeaky([]const u8, arena, raw.bytes, .{}) catch error.Malformed;
+}
 
 fn verifyJsonChecked(document: []const u8, keys: []const Key, options: Options, scratch: []u8, diagnostics: *Diagnostics) VerifyError!Verified {
     const limit: usize = options.max_bytes.raw();
@@ -491,11 +501,19 @@ fn verifyJsonChecked(document: []const u8, keys: []const Key, options: Options, 
         diagnostics.check = .shape;
         return error.Malformed;
     };
-    const flattened = wire.signature != null or wire.protected != null or wire.header != null;
-    if (flattened == (wire.signatures != null)) return error.Malformed;
+    // `signatures` selects the general syntax (RFC 7515 §7.2.2 has no such
+    // member), which reads only §7.2.1's members: a top-level `protected`,
+    // `header` or `signature` beside it is a member it does not define, and
+    // is ignored. `payload` is the one payload either way.
     var one: [1]WireSignature = undefined;
-    if (flattened) one[0] = .{ .protected = wire.protected, .header = wire.header, .signature = wire.signature orelse return error.Malformed };
-    const signatures: []const WireSignature = if (flattened) &one else wire.signatures.?;
+    const signatures: []const WireSignature = wire.signatures orelse flat: {
+        one[0] = .{
+            .protected = try flatString(fixed.allocator(), wire.protected),
+            .header = wire.header,
+            .signature = try flatString(fixed.allocator(), wire.signature) orelse return error.Malformed,
+        };
+        break :flat &one;
+    };
     if (signatures.len == 0 or signatures.len > options.max_signatures) return error.Malformed;
     const payload = wire.payload orelse "";
     if ((wire.payload == null) != (options.detached_payload != null)) return error.Malformed;

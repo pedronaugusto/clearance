@@ -255,6 +255,55 @@ test "JWE: RFC 7520 §5.1 (RSA1_5) and §5.9 (compressed) are refused" {
     }
 }
 
+test "JWE: recipients selects the general syntax, whose top-level encrypted_key and header are ignored: go-jose's FullSerialize decrypts" {
+    // go-jose v4.1.6 writes recipient 0's encrypted_key at the top level too
+    // (RFC 7516 §7.2.1: a member the general syntax does not define, ignored).
+    const document = testdata.file("vectors/go-jose/jwe-json-general.json");
+    const plaintext = "clearance interop: plaintext both ways, \u{fc}n\u{ef}c\u{f6}d\u{e9} \u{2713}";
+    var rsa = try hold(testdata.file("vectors/go-jose/rsa-private.jwk.json"));
+    defer rsa.deinit();
+    var ec = try hold(testdata.file("vectors/go-jose/ec-private.jwk.json"));
+    defer ec.deinit();
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, document, .{});
+    defer parsed.deinit();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // As written; with a top-level encrypted_key that is recipient 1's, or no
+    // key at all; with a top-level header naming another algorithm, or not an
+    // object: each decrypts the same, each recipient with its own key.
+    var forms: std.ArrayList([]const u8) = .empty;
+    try forms.append(a, document);
+    const other_key = parsed.value.object.get("recipients").?.array.items[1].object.get("encrypted_key").?;
+    for ([_]std.json.Value{ other_key, .{ .string = "AAAA" }, .{ .integer = 7 } }) |replacement| {
+        var changed = try parsed.value.object.clone(a);
+        try changed.put(a, "encrypted_key", replacement);
+        try forms.append(a, try stringify(a, .{ .object = changed }));
+    }
+    for ([_][]const u8{ "{\"alg\":\"dir\"}", "7" }) |header| {
+        var changed = try parsed.value.object.clone(a);
+        try changed.put(a, "header", try std.json.parseFromSliceLeaky(std.json.Value, a, header, .{}));
+        try forms.append(a, try stringify(a, .{ .object = changed }));
+    }
+    for (forms.items) |token| {
+        const scratch = try gpa.alloc(u8, jwe.scratchLength(token.len));
+        defer gpa.free(scratch);
+        for ([_]jwe.DecryptionKey{ rsa.key, ec.key }, 0..) |key, index| {
+            const d = try jwe.decrypt(io, token, &.{key}, options, scratch);
+            try std.testing.expectEqual(index, d.index);
+            try std.testing.expectEqualStrings(plaintext, d.plaintext);
+        }
+    }
+    // Without `recipients` the document is flattened: its encrypted_key is the one key, read as a string.
+    var flat = try parsed.value.object.clone(a);
+    _ = flat.orderedRemove("recipients");
+    try flat.put(a, "encrypted_key", .{ .integer = 7 });
+    const token = try stringify(a, .{ .object = flat });
+    const scratch = try gpa.alloc(u8, jwe.scratchLength(token.len));
+    defer gpa.free(scratch);
+    try std.testing.expectError(error.Malformed, jwe.decrypt(io, token, &.{rsa.key}, options, scratch));
+}
+
 test "JWE: allowlists, keys and tampering: what a recipient refuses" {
     var set: jwk.KeySet = undefined;
     const key = try secretKey(&set, "5_8.key_wrap_using_aes-keywrap_with_aes-gcm.json");

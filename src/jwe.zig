@@ -197,8 +197,11 @@ const WireRecipient = struct {
 const WireDocument = struct {
     protected: ?[]const u8 = null,
     unprotected: ?strand.json.Raw = null,
+    /// Read only in the flattened syntax: beside `recipients` they are
+    /// members the general syntax does not define, ignored, so held as
+    /// raw JSON and read only when used.
     header: ?strand.json.Raw = null,
-    encrypted_key: ?[]const u8 = null,
+    encrypted_key: ?strand.json.Raw = null,
     recipients: ?[]const WireRecipient = null,
     aad: ?[]const u8 = null,
     iv: []const u8,
@@ -275,14 +278,16 @@ fn decryptChecked(io: std.Io, token: []const u8, keys: []const DecryptionKey, op
             error.OutOfMemory => error.ScratchTooSmall,
             else => error.Malformed,
         };
-        const flattened = wire.header != null or wire.encrypted_key != null;
-        if (flattened and wire.recipients != null) return error.Malformed;
+        // `recipients` selects the general syntax (RFC 7516 §7.2.2 has no
+        // such member), which reads only §7.2.1's members: a top-level
+        // `header` or `encrypted_key` beside it is a member it does not
+        // define, and is ignored.
         if (wire.recipients) |list| {
             if (list.len == 0 or list.len > options.max_recipients) return error.Malformed;
             const all = arena.alloc(Written, list.len) catch return error.ScratchTooSmall;
             for (list, all) |r, *out| out.* = .{ .header = if (r.header) |h| h.bytes else null, .encrypted_key = r.encrypted_key orelse "" };
             recipients = all;
-        } else one[0] = .{ .header = if (wire.header) |h| h.bytes else null, .encrypted_key = wire.encrypted_key orelse "" };
+        } else one[0] = .{ .header = if (wire.header) |h| h.bytes else null, .encrypted_key = try flatString(arena, wire.encrypted_key) orelse "" };
         shared = .{
             .protected_b64 = wire.protected orelse "",
             .protected = "",
@@ -907,6 +912,16 @@ fn encryptDrawn(gpa: std.mem.Allocator, draw: Draw, out: *Writer, header: Encryp
             try out.writeByte('}');
         },
     }
+}
+
+/// A top-level member only the flattened syntax reads, as the JSON string it
+/// must be there.
+fn flatString(arena: std.mem.Allocator, member: ?strand.json.Raw) error{ Malformed, ScratchTooSmall }!?[]const u8 {
+    const raw = member orelse return null;
+    return strand.json.parseLeaky([]const u8, arena, raw.bytes, .{}) catch |err| switch (err) {
+        error.OutOfMemory => error.ScratchTooSmall,
+        else => error.Malformed,
+    };
 }
 
 fn rawOf(json: ?[]const u8) ?strand.json.Raw {
