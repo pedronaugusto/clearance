@@ -13,7 +13,7 @@ const oauth = @import("clearance.oauth");
 const shakedown = @import("shakedown");
 const provenance = @import("preflight_bench_options");
 
-const WorkloadError = clearance.jwt.VerifyError || clearance.jwe.DecryptError || clearance.jwe.EncryptError || clearance.id_token.VerifyError || clearance.dpop.VerifyError || clearance.logout.VerifyError || clearance.jwk.PrivateError || clearance.jwt.SignError || clearance.jwk.ParseError ||
+const WorkloadError = clearance.jwt.VerifyError || clearance.jwe.DecryptError || clearance.jwe.EncryptError || clearance.id_token.NestedVerifyError || clearance.dpop.VerifyError || clearance.logout.VerifyError || clearance.jwk.PrivateError || clearance.jwt.SignError || clearance.jwk.ParseError ||
     oauth.token.ReadError || oauth.device.ReadError || oauth.revocation.ReadError || oauth.par.ReadError || oauth.userinfo.ReadError || oauth.client_auth.Error || oauth.metadata.ReadError || oauth.authorize.WriteError || oauth.request_object.Error || error{Refused};
 const Row = shakedown.bench.Row(Bench, WorkloadError);
 
@@ -444,10 +444,10 @@ const Bench = struct {
             .issuer = "https://op.example",
             .client_id = "app",
             .nonce = "n-0S6_WzA2Mj",
-            .decryption = .{ .io = b.io, .keys = &.{.{ .material = .{ .secret = &kek } }}, .options = .{ .key_algorithms = &.{.a128kw}, .encryptions = &.{.a128gcm} } },
         };
+        const decryption: clearance.jwt.Decryption = .{ .keys = &.{.{ .material = .{ .secret = &kek } }}, .options = .{ .key_algorithms = &.{.a128kw}, .encryptions = &.{.a128gcm} } };
         for (0..units) |_| {
-            const v = try clearance.id_token.verify(void, b.jwe_token.written(), &keys, expected, id_token_now, b.jwe_scratch);
+            const v = try clearance.id_token.verifyNested(void, b.io, b.jwe_token.written(), decryption, &keys, expected, id_token_now, b.jwe_scratch);
             b.sink +%= v.registered.sub.?.len;
         }
     }

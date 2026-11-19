@@ -378,9 +378,8 @@ pub const AuthorizationFlow = struct {
     /// Verifies the ID token `set` brought (`error.NoIdToken` when none):
     /// for the client `client_id` from `server`, with this flow's `nonce` and
     /// the set's access token for `at_hash`, signed by one of `keys` with one
-    /// of `algorithms`, decrypted first with `decryption` when the client
-    /// registered encrypted ID tokens. Strings borrow from `scratch` and the
-    /// keys.
+    /// of `algorithms`. Strings borrow from `scratch` and the keys. A client
+    /// that registered encrypted ID tokens verifies with `verifyNestedIdToken`.
     pub fn verifyIdToken(
         flow: *const AuthorizationFlow,
         comptime Extra: type,
@@ -389,19 +388,42 @@ pub const AuthorizationFlow = struct {
         client_id: []const u8,
         keys: []const clearance.Key,
         algorithms: []const clearance.Algorithm,
-        decryption: ?clearance.jwt.Decryption,
         now: std.Io.Timestamp,
         scratch: []u8,
     ) (clearance.id_token.VerifyError || error{NoIdToken})!clearance.id_token.Verified(Extra) {
         const token_text = set.id_token orelse return error.NoIdToken;
-        return clearance.id_token.verify(Extra, token_text, keys, .{
+        return clearance.id_token.verify(Extra, token_text, keys, flow.expected(set, server, client_id, algorithms), now, scratch);
+    }
+
+    /// `verifyIdToken` for a client that registered encrypted ID tokens
+    /// (`id_token_encrypted_response_alg`): the token is decrypted with
+    /// `decryption` first, drawing on `io`, and a signed token alone is refused.
+    pub fn verifyNestedIdToken(
+        flow: *const AuthorizationFlow,
+        comptime Extra: type,
+        io: std.Io,
+        set: *const TokenSet,
+        server: *const Server,
+        client_id: []const u8,
+        decryption: clearance.jwt.Decryption,
+        keys: []const clearance.Key,
+        algorithms: []const clearance.Algorithm,
+        now: std.Io.Timestamp,
+        scratch: []u8,
+    ) (clearance.id_token.NestedVerifyError || error{NoIdToken})!clearance.id_token.Verified(Extra) {
+        const token_text = set.id_token orelse return error.NoIdToken;
+        return clearance.id_token.verifyNested(Extra, io, token_text, decryption, keys, flow.expected(set, server, client_id, algorithms), now, scratch);
+    }
+
+    /// What this flow's ID token is held to.
+    fn expected(flow: *const AuthorizationFlow, set: *const TokenSet, server: *const Server, client_id: []const u8, algorithms: []const clearance.Algorithm) clearance.id_token.Expected {
+        return .{
             .algorithms = algorithms,
             .issuer = server.issuer,
             .client_id = client_id,
             .nonce = if (flow.nonce) |*n| n else null,
             .access_token = set.access_token,
-            .decryption = decryption,
-        }, now, scratch);
+        };
     }
 
     pub fn deinit(flow: *AuthorizationFlow) void {
@@ -632,7 +654,10 @@ pub fn userinfo(comptime Claims: type, arena: std.mem.Allocator, io: std.Io, htt
             }
         };
         const signed: ?userinfo_message.Expected.Signed = if (options.signed) |s| .{ .keys = s.keys, .algorithms = s.algorithms, .issuer = server.issuer, .client_id = s.client_id, .now = std.Io.Clock.real.now(io) } else null;
-        return userinfo_message.readResponse(Claims, arena, answer.status, answer.content_type.slice(), answer.challenges, answer.body, .{ .subject = subject, .signed = signed, .encrypted = options.encrypted }, .{ .max_bytes = options.max_bytes });
+        const expected: userinfo_message.Expected = .{ .subject = subject, .signed = signed };
+        const read: userinfo_message.ReadOptions = .{ .max_bytes = options.max_bytes };
+        if (options.encrypted) |decryption| return userinfo_message.readEncryptedResponse(Claims, io, arena, answer.status, answer.content_type.slice(), answer.challenges, answer.body, decryption, expected, read);
+        return userinfo_message.readResponse(Claims, arena, answer.status, answer.content_type.slice(), answer.challenges, answer.body, expected, read);
     }
 }
 

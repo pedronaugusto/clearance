@@ -296,7 +296,7 @@ fn headerOf(wire: WireHeader, alg: Algorithm) Header {
 /// DPoP proof, whose `jwk` the profile has read and checked), or a caller
 /// that holds a single key by other means. The key must fit the header's
 /// algorithm, which the options must allow.
-pub fn verifyWith(token: []const u8, key: *const Key, options: Options, scratch: []u8) VerifyError!Verified {
+pub fn verifyKey(token: []const u8, key: *const Key, options: Options, scratch: []u8) VerifyError!Verified {
     aegis.assert.invariant(options.algorithms.len > 0, "options.algorithms.len > 0");
     var diagnostics: Diagnostics = .{};
     defer if (options.diagnostics) |d| {

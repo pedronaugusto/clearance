@@ -59,7 +59,7 @@ pub const ClientMetadata = struct {
     request_object_encryption_enc: ?[]const u8 = null,
     require_signed_request_object: ?bool = null,
     /// OpenID Connect Registration §2: encrypted ID tokens and UserInfo
-    /// answers (`id_token.Expected.decryption`, `userinfo.Expected.encrypted`).
+    /// answers (`id_token.verifyNested`, `userinfo.readEncryptedResponse`).
     id_token_encrypted_response_alg: ?[]const u8 = null,
     id_token_encrypted_response_enc: ?[]const u8 = null,
     userinfo_signed_response_alg: ?[]const u8 = null,

@@ -123,3 +123,25 @@ test "inspect checks type and claims as verify does, with no key and any signatu
     try std.testing.expectError(error.InvalidClaims, jwt.inspect(struct { client_id: u32 }, written, expected, now, &scratch));
     try std.testing.expectError(error.Unsigned, jwt.inspect(void, "eyJhbGciOiJub25lIn0.e30.", .{}, now, &scratch));
 }
+
+test "a nested JWT is verifyNested's alone: verify refuses a JWE by name, and verifyNested refuses a signed token" {
+    const jwe = @import("jwe.zig");
+    var signed: std.Io.Writer.Allocating = .init(gpa);
+    defer signed.deinit();
+    try token(&signed, "{\"exp\":1700000001}", "JWT");
+    const kek: [16]u8 = @splat(0x4b);
+    var sealed: std.Io.Writer.Allocating = .init(gpa);
+    defer sealed.deinit();
+    try jwe.encrypt(gpa, std.testing.io, &sealed.writer, .{ .enc = .a128gcm, .cty = "JWT" }, signed.written(), &.{.{ .alg = .a128kw, .key = .{ .key = Key.hmac(&kek) } }}, .compact, .{});
+    const decryption: jwt.Decryption = .{ .keys = &.{.{ .material = .{ .secret = &kek } }}, .options = .{ .key_algorithms = &.{.a128kw}, .encryptions = &.{.a128gcm} } };
+    var scratch: [jwe.scratchLength(4096)]u8 = undefined;
+    _ = try jwt.verifyNested(void, std.testing.io, sealed.written(), decryption, &keys, base, now, &scratch);
+    // No downgrade where encryption is expected.
+    try std.testing.expectError(error.NotEncrypted, jwt.verifyNested(void, std.testing.io, signed.written(), decryption, &keys, base, now, &scratch));
+    // A JWE handed to `verify` is named for the call that reads it.
+    var diagnostics: jws.Diagnostics = .{};
+    var told = base;
+    told.diagnostics = &diagnostics;
+    try std.testing.expectError(error.Encrypted, jwt.verify(void, sealed.written(), &keys, told, now, &scratch));
+    try std.testing.expectEqual(jws.Check.shape, diagnostics.check);
+}

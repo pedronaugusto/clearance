@@ -177,12 +177,12 @@ test "an encrypted request object is the signed one inside a JWE to the server" 
     }, now);
     try testing.expectEqual(@as(usize, 4), std.mem.count(u8, out.written(), "."));
     var scratch: [jwe.scratchLength(4096)]u8 = undefined;
-    const v = try jwt.verify(struct { state: []const u8 }, out.written(), &.{clearance.Key.hmac(&secret)}, .{
+    const decryption: jwt.Decryption = .{ .keys = &.{.{ .material = .{ .secret = &kek } }}, .options = .{ .key_algorithms = &.{.a128kw}, .encryptions = &.{.a128gcm} } };
+    const v = try jwt.verifyNested(struct { state: []const u8 }, testing.io, out.written(), decryption, &.{clearance.Key.hmac(&secret)}, .{
         .algorithms = &.{.hs256},
         .issuer = "s6BhdRkqt3",
         .audience = "https://server.example.com",
         .typ = media_type,
-        .decryption = .{ .io = testing.io, .keys = &.{.{ .material = .{ .secret = &kek } }}, .options = .{ .key_algorithms = &.{.a128kw}, .encryptions = &.{.a128gcm} } },
     }, now, &scratch);
     try testing.expectEqualStrings("af0ifjsldkj", v.claims.state);
     // A recipient key that does not fit its algorithm.

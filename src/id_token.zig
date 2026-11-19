@@ -41,10 +41,6 @@ pub const Expected = struct {
     access_token: ?[]const u8 = null,
     leeway: Duration = .literal("0s"),
     max_bytes: aegis.units.Bytes(usize) = .literal("16KiB"),
-    /// Set when the client registered `id_token_encrypted_response_alg`:
-    /// the token must be a nested JWT these keys decrypt (Core §10.2), and a
-    /// signed token alone is refused.
-    decryption: ?jwt.Decryption = null,
     diagnostics: ?*jws.Diagnostics = null,
 };
 
@@ -89,25 +85,51 @@ pub const VerifyError = jwt.VerifyError || error{
     WrongAccessTokenHash,
 };
 
+pub const NestedVerifyError = VerifyError || jwt.NestedError;
+
 /// Verifies an ID token, reading the caller's claims into `Extra` (a struct,
 /// or `void`). Strings borrow from `scratch` (at least
-/// `jws.scratchLength(token.len)` bytes, `jwe.scratchLength(token.len)` with
-/// `decryption`) and the keys.
+/// `jws.scratchLength(token.len)` bytes) and the keys. An encrypted token is
+/// refused (`Encrypted`): a client that registered
+/// `id_token_encrypted_response_alg` verifies with `verifyNested`.
 pub fn verify(comptime Extra: type, token: []const u8, keys: []const Key, expected: Expected, now: std.Io.Timestamp, scratch: []u8) VerifyError!Verified(Extra) {
     var diagnostics: jws.Diagnostics = .{};
     defer if (expected.diagnostics) |d| {
         d.* = diagnostics;
     };
-    const verified = try jwt.verify(Extra, token, keys, .{
+    const verified = try jwt.verify(Extra, token, keys, validationOf(expected, &diagnostics), now, scratch);
+    return checked(Extra, verified, expected, now, &diagnostics);
+}
+
+/// Verifies the ID token of a client that registered
+/// `id_token_encrypted_response_alg` (Core §10.2): a nested JWT `decryption`
+/// decrypts, then `verify`'s checks. A signed token alone is refused
+/// (`NotEncrypted`). `io` is what the decryption draws from; `scratch` holds
+/// at least `jwe.scratchLength(token.len)` bytes.
+pub fn verifyNested(comptime Extra: type, io: std.Io, token: []const u8, decryption: jwt.Decryption, keys: []const Key, expected: Expected, now: std.Io.Timestamp, scratch: []u8) NestedVerifyError!Verified(Extra) {
+    var diagnostics: jws.Diagnostics = .{};
+    defer if (expected.diagnostics) |d| {
+        d.* = diagnostics;
+    };
+    const verified = try jwt.verifyNested(Extra, io, token, decryption, keys, validationOf(expected, &diagnostics), now, scratch);
+    return checked(Extra, verified, expected, now, &diagnostics);
+}
+
+/// What an ID token is held to as a JWT (Core §3.1.3.7).
+fn validationOf(expected: Expected, diagnostics: *jws.Diagnostics) jwt.Validation {
+    return .{
         .algorithms = expected.algorithms,
         .issuer = expected.issuer,
         .audience = expected.client_id,
         .required = .{ .iss = true, .sub = true, .aud = true, .exp = true, .iat = true },
         .leeway = expected.leeway,
         .max_bytes = expected.max_bytes,
-        .decryption = expected.decryption,
-        .diagnostics = &diagnostics,
-    }, now, scratch);
+        .diagnostics = diagnostics,
+    };
+}
+
+/// The OpenID Connect checks after the JWT's, each failure named in `diagnostics`.
+fn checked(comptime Extra: type, verified: jwt.Verified(Extra), expected: Expected, now: std.Io.Timestamp, diagnostics: *jws.Diagnostics) VerifyError!Verified(Extra) {
     return check(Extra, verified, expected, now) catch |err| {
         diagnostics.check = switch (err) {
             error.WrongType => .type,
@@ -265,9 +287,7 @@ test "an encrypted ID token (Core §10.2) is decrypted, then verified; a signed 
     defer signed.deinit();
     try idToken(&signed, good, "JWT");
     const kek: [16]u8 = @splat(0x4b);
-    var expected = test_expected;
-    expected.decryption = .{
-        .io = testing.io,
+    const decryption: jwt.Decryption = .{
         .keys = &.{.{ .material = .{ .secret = &kek } }},
         .options = .{ .key_algorithms = &.{.a128kw}, .encryptions = &.{.a128cbc_hs256} },
     };
@@ -277,31 +297,35 @@ test "an encrypted ID token (Core §10.2) is decrypted, then verified; a signed 
         var nested: std.Io.Writer.Allocating = .init(testing.allocator);
         defer nested.deinit();
         try jwe.encrypt(testing.allocator, testing.io, &nested.writer, .{ .enc = .a128cbc_hs256, .cty = cty }, signed.written(), &.{.{ .alg = .a128kw, .key = .{ .key = Key.hmac(&kek) } }}, .compact, .{});
-        const v = try verify(struct { email: []const u8 }, nested.written(), &test_keys, expected, test_now, &scratch);
+        const v = try verifyNested(struct { email: []const u8 }, testing.io, nested.written(), decryption, &test_keys, test_expected, test_now, &scratch);
         try testing.expectEqualStrings("j@example.com", v.claims.email);
     }
-    // A signed token alone, when encryption was registered.
-    try testing.expectError(error.NotEncrypted, verify(void, signed.written(), &test_keys, expected, test_now, &scratch));
+    // A signed token alone, when encryption was registered: no downgrade.
+    try testing.expectError(error.NotEncrypted, verifyNested(void, testing.io, signed.written(), decryption, &test_keys, test_expected, test_now, &scratch));
     // Content of another type.
     var other: std.Io.Writer.Allocating = .init(testing.allocator);
     defer other.deinit();
     try jwe.encrypt(testing.allocator, testing.io, &other.writer, .{ .enc = .a128cbc_hs256, .cty = "json" }, signed.written(), &.{.{ .alg = .a128kw, .key = .{ .key = Key.hmac(&kek) } }}, .compact, .{});
-    try testing.expectError(error.WrongType, verify(void, other.written(), &test_keys, expected, test_now, &scratch));
+    try testing.expectError(error.WrongType, verifyNested(void, testing.io, other.written(), decryption, &test_keys, test_expected, test_now, &scratch));
     // Encrypted content that is no signed JWT (a bare claims set) is refused
     // as a malformed JWS: anyone holding the client's public key can encrypt
     // to it, so the signature is what names the issuer.
     var bare: std.Io.Writer.Allocating = .init(testing.allocator);
     defer bare.deinit();
     try jwe.encrypt(testing.allocator, testing.io, &bare.writer, .{ .enc = .a128cbc_hs256 }, good, &.{.{ .alg = .a128kw, .key = .{ .key = Key.hmac(&kek) } }}, .compact, .{});
-    try testing.expectError(error.Malformed, verify(void, bare.written(), &test_keys, expected, test_now, &scratch));
+    try testing.expectError(error.Malformed, verifyNested(void, testing.io, bare.written(), decryption, &test_keys, test_expected, test_now, &scratch));
     // Under another key, or an algorithm off the allowlist.
     const wrong: [16]u8 = @splat(0x11);
-    var wrong_key = expected;
-    wrong_key.decryption.?.keys = &.{.{ .material = .{ .secret = &wrong } }};
-    try testing.expectError(error.DecryptionFailed, verify(void, other.written(), &test_keys, wrong_key, test_now, &scratch));
-    var narrow = expected;
-    narrow.decryption.?.options.encryptions = &.{.a256gcm};
-    try testing.expectError(error.AlgorithmNotAllowed, verify(void, other.written(), &test_keys, narrow, test_now, &scratch));
-    // Without `decryption`, an encrypted token is no signed one.
-    try testing.expectError(error.Malformed, verify(void, other.written(), &test_keys, test_expected, test_now, &scratch));
+    var wrong_key = decryption;
+    wrong_key.keys = &.{.{ .material = .{ .secret = &wrong } }};
+    try testing.expectError(error.DecryptionFailed, verifyNested(void, testing.io, other.written(), wrong_key, &test_keys, test_expected, test_now, &scratch));
+    var narrow = decryption;
+    narrow.options.encryptions = &.{.a256gcm};
+    try testing.expectError(error.AlgorithmNotAllowed, verifyNested(void, testing.io, other.written(), narrow, &test_keys, test_expected, test_now, &scratch));
+    // `verify` refuses an encrypted token by name: it is `verifyNested`'s.
+    var diagnostics: jws.Diagnostics = .{};
+    var told = test_expected;
+    told.diagnostics = &diagnostics;
+    try testing.expectError(error.Encrypted, verify(void, other.written(), &test_keys, told, test_now, &scratch));
+    try testing.expectEqual(jws.Check.shape, diagnostics.check);
 }

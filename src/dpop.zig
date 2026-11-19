@@ -210,7 +210,7 @@ fn verifyChecked(io: std.Io, proof: []const u8, expected: Expected, now: std.Io.
     };
     if (out.key.material == .hmac) return error.InvalidKey;
 
-    const verified = try jws.verifyWith(proof, &out.key, .{
+    const verified = try jws.verifyKey(proof, &out.key, .{
         .algorithms = expected.algorithms,
         .max_bytes = expected.max_bytes,
         .min_rsa_bits = expected.min_rsa_bits,

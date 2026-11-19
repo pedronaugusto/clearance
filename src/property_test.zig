@@ -157,7 +157,7 @@ fn anyProof(case: ProofCase, c: *shake.Case) !void {
     if (verified.key.material == .hmac) return error.SecretKey;
     if (!std.mem.eql(u8, &verified.thumbprint, &jwk.thumbprint(verified.key))) return error.WrongThumbprint;
     // What verified must verify again with the key it named.
-    _ = try jws.verifyWith(input, &verified.key, .{ .algorithms = &.{ .es256, .eddsa } }, &scratch);
+    _ = try jws.verifyKey(input, &verified.key, .{ .algorithms = &.{ .es256, .eddsa } }, &scratch);
 }
 
 test "any bytes are a DPoP proof of the request expected, by the key it carries, or refused" {
@@ -294,10 +294,10 @@ fn anyNested(case: NestedCase, c: *shake.Case) !void {
     const input = shake.gen.mutated(c.source, &buffer, &.{ case.nested, case.signed });
     var scratch: [jwe.scratchLength(2048)]u8 = undefined;
     const keys = [_]Key{Key.hmac(case.secret)};
-    const verified = jwt.verify(struct { name: []const u8 }, input, &keys, .{
+    const decryption: jwt.Decryption = .{ .keys = &.{.{ .material = .{ .secret = case.kek } }}, .options = .{ .key_algorithms = &.{.a128kw}, .encryptions = &.{.a128gcm} } };
+    const verified = jwt.verifyNested(struct { name: []const u8 }, std.testing.io, input, decryption, &keys, .{
         .algorithms = &.{.hs256},
         .required = .{ .exp = false },
-        .decryption = .{ .io = std.testing.io, .keys = &.{.{ .material = .{ .secret = case.kek } }}, .options = .{ .key_algorithms = &.{.a128kw}, .encryptions = &.{.a128gcm} } },
     }, .{ .nanoseconds = 0 }, &scratch) catch return;
     if (!std.mem.eql(u8, "sealed", verified.claims.name)) return error.Forged;
     if (std.mem.count(u8, input, ".") != 4) return error.NotNested;

@@ -53,11 +53,6 @@ pub const Expected = struct {
     /// (`userinfo_signed_response_alg`): the answer must be a JWT these
     /// keys verify. Null takes JSON alone.
     signed: ?Signed = null,
-    /// Set when the client registered an encrypted response
-    /// (`userinfo_encrypted_response_alg`): the answer must be a JWE these
-    /// keys decrypt, its content the signed JWT when `signed` is set and
-    /// the claims as JSON when not.
-    encrypted: ?jwt.Decryption = null,
 
     pub const Signed = struct {
         keys: []const clearance.Key,
@@ -107,37 +102,58 @@ pub const ReadError = error{
 /// Reads a UserInfo answer into `Claims` (a struct; `Standard` reads OpenID
 /// Connect's own). `content_type` is the answer's media type, without
 /// parameters; `challenges` its `WWW-Authenticate` lines. Strings live in
-/// `arena`.
+/// `arena`. An encrypted answer is refused (`WrongForm`): a client that
+/// registered `userinfo_encrypted_response_alg` reads with
+/// `readEncryptedResponse`.
 pub fn readResponse(comptime Claims: type, arena: std.mem.Allocator, status: u16, content_type: []const u8, challenges: []const []const u8, body: []const u8, expected: Expected, options: ReadOptions) ReadError!Response(Claims) {
+    if (try refusal(Claims, arena, status, challenges, body, options)) |refused| return refused;
+    const is_jwt = std.ascii.eqlIgnoreCase(content_type, "application/jwt");
+    if (is_jwt != (expected.signed != null)) return error.WrongForm;
+    // A compact JWE: an encrypted answer, which only `readEncryptedResponse` reads.
+    if (is_jwt and std.mem.count(u8, std.mem.trim(u8, body, " \t\r\n"), ".") == 4) return error.WrongForm;
+    return readContent(Claims, arena, body, &.{}, expected, options);
+}
+
+/// `readResponse` for a client that registered an encrypted answer
+/// (`userinfo_encrypted_response_alg`): a JWE `decryption` decrypts, its
+/// content the signed JWT when `expected.signed` is set and the claims as JSON
+/// when not. An answer that is not encrypted is refused (`WrongForm`). `io` is
+/// what the decryption draws from.
+pub fn readEncryptedResponse(comptime Claims: type, io: std.Io, arena: std.mem.Allocator, status: u16, content_type: []const u8, challenges: []const []const u8, body: []const u8, decryption: jwt.Decryption, expected: Expected, options: ReadOptions) ReadError!Response(Claims) {
+    if (try refusal(Claims, arena, status, challenges, body, options)) |refused| return refused;
+    if (!std.ascii.eqlIgnoreCase(content_type, "application/jwt")) return error.WrongForm;
+    const scratch = try arena.alloc(u8, clearance.jwe.scratchLength(body.len));
+    var diagnostics: clearance.jws.Diagnostics = .{};
+    const nested = jwt.decryptNested(io, std.mem.trim(u8, body, " \t\r\n"), decryption, scratch, &diagnostics) catch |err| return switch (err) {
+        error.NotEncrypted => error.WrongForm,
+        error.TooLarge => error.TooLarge,
+        // unreachable: the scratch is the length `decrypt` asks for
+        error.ScratchTooSmall => unreachable,
+        else => error.InvalidEncryption,
+    };
+    return readContent(Claims, arena, nested.content, nested.rest, expected, options);
+}
+
+/// An answer that is not a 200: the resource's refusal, read from its
+/// challenge or its error body; null for a 200.
+fn refusal(comptime Claims: type, arena: std.mem.Allocator, status: u16, challenges: []const []const u8, body: []const u8, options: ReadOptions) ReadError!?Response(Claims) {
     const limit: usize = options.max_bytes.raw();
     if (body.len > limit) return error.TooLarge;
-    if (status != 200) {
-        if (challenge.read(arena, challenges) catch null) |c| if (c.@"error") |code| if (code != .other) {
-            return .{ .refused = .{ .code = code, .name = .init(@tagName(code)), .description = .init(c.error_description orelse "") } };
-        };
-        var scratch: [1024]u8 = undefined;
-        if (body.len <= 4096) if (errors.readJson(body, &scratch)) |e| return .{ .refused = e };
-        return error.UnexpectedStatus;
-    }
-    const is_jwt = std.ascii.eqlIgnoreCase(content_type, "application/jwt");
-    if (is_jwt != (expected.signed != null or expected.encrypted != null)) return error.WrongForm;
-    var content = body;
-    var scratch: []u8 = &.{};
-    if (expected.encrypted) |decryption| {
-        scratch = try arena.alloc(u8, clearance.jwe.scratchLength(body.len));
-        var diagnostics: clearance.jws.Diagnostics = .{};
-        const nested = jwt.decryptNested(std.mem.trim(u8, body, " \t\r\n"), decryption, scratch, &diagnostics) catch |err| return switch (err) {
-            error.NotEncrypted => error.WrongForm,
-            error.TooLarge => error.TooLarge,
-            // unreachable: the scratch is the length `decrypt` asks for
-            error.ScratchTooSmall => unreachable,
-            else => error.InvalidEncryption,
-        };
-        content = nested.content;
-        scratch = nested.rest;
-    }
+    if (status == 200) return null;
+    if (challenge.read(arena, challenges) catch null) |c| if (c.@"error") |code| if (code != .other) {
+        return .{ .refused = .{ .code = code, .name = .init(@tagName(code)), .description = .init(c.error_description orelse "") } };
+    };
+    var scratch: [1024]u8 = undefined;
+    if (body.len <= 4096) if (errors.readJson(body, &scratch)) |e| return .{ .refused = e };
+    return error.UnexpectedStatus;
+}
+
+/// A 200's content, decrypted already where it came encrypted: the signed JWT
+/// when `expected.signed` is set, else the claims as JSON. `scratch` is what is
+/// left of the decryption's buffer, or empty.
+fn readContent(comptime Claims: type, arena: std.mem.Allocator, content: []const u8, decrypted_rest: []u8, expected: Expected, options: ReadOptions) ReadError!Response(Claims) {
     if (expected.signed) |signed| {
-        if (scratch.len == 0) scratch = try arena.alloc(u8, clearance.jws.scratchLength(body.len));
+        const scratch = if (decrypted_rest.len != 0) decrypted_rest else try arena.alloc(u8, clearance.jws.scratchLength(content.len));
         const token = std.mem.trim(u8, content, " \t\r\n");
         // An audience, when the token names one, must be the client (§5.3.2
         // has it SHOULD): asked for only then, since `jwt.verify` refuses an
@@ -251,7 +267,6 @@ test "an encrypted answer is decrypted: its content the claims, or the signed JW
     const a = arena.allocator();
     const kek: [32]u8 = @splat(0x4b);
     const encrypted: jwt.Decryption = .{
-        .io = testing.io,
         .keys = &.{.{ .material = .{ .secret = &kek } }},
         .options = .{ .key_algorithms = &.{.a256kw}, .encryptions = &.{.a256gcm} },
     };
@@ -264,24 +279,27 @@ test "an encrypted answer is decrypted: its content the claims, or the signed JW
         }
     }.seal;
     // Encrypted only: the content is the claims as JSON.
-    const plain: Expected = .{ .subject = "u1", .encrypted = encrypted };
+    const plain: Expected = .{ .subject = "u1" };
     const sealed = try seal(a, "{\"sub\":\"u1\",\"name\":\"Jane\"}", null, &recipient);
-    try testing.expectEqualStrings("Jane", (try readResponse(Standard, a, 200, "application/jwt", &.{}, sealed, plain, .{})).claims.name.?);
-    try testing.expectError(error.WrongSubject, readResponse(Standard, a, 200, "application/jwt", &.{}, try seal(a, "{\"sub\":\"u2\"}", null, &recipient), plain, .{}));
-    try testing.expectError(error.WrongForm, readResponse(Standard, a, 200, "application/json", &.{}, "{\"sub\":\"u1\"}", plain, .{}));
+    try testing.expectEqualStrings("Jane", (try readEncryptedResponse(Standard, testing.io, a, 200, "application/jwt", &.{}, sealed, encrypted, plain, .{})).claims.name.?);
+    try testing.expectError(error.WrongSubject, readEncryptedResponse(Standard, testing.io, a, 200, "application/jwt", &.{}, try seal(a, "{\"sub\":\"u2\"}", null, &recipient), encrypted, plain, .{}));
+    try testing.expectError(error.WrongForm, readEncryptedResponse(Standard, testing.io, a, 200, "application/json", &.{}, "{\"sub\":\"u1\"}", encrypted, plain, .{}));
     // Signed then encrypted: the content is a JWT the keys verify.
     const secret: [32]u8 = @splat(0x55);
     const keys = [_]clearance.Key{clearance.Key.hmac(&secret)};
     const now: std.Io.Timestamp = .{ .nanoseconds = 1_800_000_000 * std.time.ns_per_s };
-    const both: Expected = .{ .subject = "u1", .encrypted = encrypted, .signed = .{ .keys = &keys, .algorithms = &.{.hs256}, .issuer = "https://as.example", .client_id = "app", .now = now } };
+    const both: Expected = .{ .subject = "u1", .signed = .{ .keys = &keys, .algorithms = &.{.hs256}, .issuer = "https://as.example", .client_id = "app", .now = now } };
     var signed: std.Io.Writer.Allocating = .init(a);
     try clearance.jws.sign(a, testing.io, &signed.writer, .{ .typ = "JWT" }, "{\"iss\":\"https://as.example\",\"aud\":\"app\",\"sub\":\"u1\",\"name\":\"Jane\"}", .{ .hmac = .{ .alg = .hs256, .secret = &secret } });
-    try testing.expectEqualStrings("Jane", (try readResponse(Standard, a, 200, "application/jwt", &.{}, try seal(a, signed.written(), "JWT", &recipient), both, .{})).claims.name.?);
+    try testing.expectEqualStrings("Jane", (try readEncryptedResponse(Standard, testing.io, a, 200, "application/jwt", &.{}, try seal(a, signed.written(), "JWT", &recipient), encrypted, both, .{})).claims.name.?);
     // A signed answer that was not encrypted, the claims encrypted unsigned,
     // and a JWE under another key.
-    try testing.expectError(error.WrongForm, readResponse(Standard, a, 200, "application/jwt", &.{}, signed.written(), both, .{}));
-    try testing.expectError(error.InvalidSignature, readResponse(Standard, a, 200, "application/jwt", &.{}, sealed, both, .{}));
+    try testing.expectError(error.WrongForm, readEncryptedResponse(Standard, testing.io, a, 200, "application/jwt", &.{}, signed.written(), encrypted, both, .{}));
+    try testing.expectError(error.InvalidSignature, readEncryptedResponse(Standard, testing.io, a, 200, "application/jwt", &.{}, sealed, encrypted, both, .{}));
     const other: [32]u8 = @splat(0x11);
     const elsewhere = [_]clearance.jwe.Recipient{.{ .alg = .a256kw, .key = .{ .key = clearance.Key.hmac(&other) } }};
-    try testing.expectError(error.InvalidEncryption, readResponse(Standard, a, 200, "application/jwt", &.{}, try seal(a, signed.written(), "JWT", &elsewhere), both, .{}));
+    // The plain read refuses an encrypted answer by its form: it is
+    // `readEncryptedResponse`'s.
+    try testing.expectError(error.WrongForm, readResponse(Standard, a, 200, "application/jwt", &.{}, sealed, both, .{}));
+    try testing.expectError(error.InvalidEncryption, readEncryptedResponse(Standard, testing.io, a, 200, "application/jwt", &.{}, try seal(a, signed.written(), "JWT", &elsewhere), encrypted, both, .{}));
 }
