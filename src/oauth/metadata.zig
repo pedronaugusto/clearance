@@ -198,8 +198,7 @@ pub fn readProtectedResource(gpa: std.mem.Allocator, body: []const u8, asked: []
 }
 
 fn parse(comptime T: type, gpa: std.mem.Allocator, body: []const u8, options: Options) ReadError!Parsed(T) {
-    const limit: usize = options.max_bytes.raw();
-    if (body.len > limit) return error.TooLarge;
+    if (options.max_bytes.compare(.fromRaw(body.len)) == .lt) return error.TooLarge;
     return strand.json.parseOwned(T, gpa, body, .{
         .ignore_unknown_fields = true,
         .limits = .{ .depth = 32 },

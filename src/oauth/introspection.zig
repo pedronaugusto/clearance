@@ -85,8 +85,7 @@ pub const ReadOptions = struct {
 
 /// Reads the answer into `arena`, which owns the strings.
 pub fn readResponse(arena: std.mem.Allocator, status: u16, body: []const u8, options: ReadOptions) ReadError!Response {
-    const limit: usize = options.max_bytes.raw();
-    if (body.len > limit) return error.TooLarge;
+    if (options.max_bytes.compare(.fromRaw(body.len)) == .lt) return error.TooLarge;
     if (status < 200 or status > 299) {
         var scratch: [1024]u8 = undefined;
         if (body.len <= 4096) if (errors.readJson(body, &scratch)) |e| return .{ .refused = e };

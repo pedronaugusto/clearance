@@ -108,9 +108,9 @@ pub fn verifyToken(io: std.Io, token: []const u8, keys: []const Key, expected: E
     const jti = verified.registered.jti.?;
     const exp = verified.registered.exp.?;
     if (expected.replay) |replay| {
-        const seconds: i64 = time.unixSeconds(now);
-        const leeway: i64 = expected.leeway.raw();
-        const fresh = replay.record(io, jwt.replayId(expected.issuer, jti), exp +| leeway +| 1, seconds) catch |err| switch (err) {
+        const leeway = expected.leeway.convert(.second, i64, .exact);
+        const until = time.NumericDate.fromRaw(exp).saturatingAdd(leeway).saturatingAdd(.literal("1s"));
+        const fresh = replay.record(io, jwt.replayId(expected.issuer, jti), until.raw(), time.unixSeconds(now)) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             error.Full => {
                 diagnostics.check = .replay;

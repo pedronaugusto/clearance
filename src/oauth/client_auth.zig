@@ -227,17 +227,16 @@ fn basic(gpa: std.mem.Allocator, id: []const u8, secret: []const u8) std.mem.All
 }
 
 fn signAssertion(gpa: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, id: []const u8, p: PrivateKeyJwt, context: Context) Error!void {
-    const now: i64 = time.unixSeconds(context.now);
+    const now = time.NumericDate.fromRaw(time.unixSeconds(context.now));
     var jti: [pkce.length]u8 = undefined;
     pkce.random(io, &jti);
-    const lifetime: i64 = p.lifetime.raw();
     jwt.sign(gpa, io, out, .{ .kid = p.kid }, .{
         .iss = id,
         .sub = id,
         .aud = context.issuer,
         .jti = @as([]const u8, &jti),
-        .iat = now,
-        .exp = now + lifetime,
+        .iat = now.raw(),
+        .exp = now.saturatingAdd(p.lifetime.convert(.second, i64, .exact)).raw(),
     }, p.signer) catch |err| return switch (err) {
         error.OutOfMemory, error.WriteFailed => error.OutOfMemory,
         error.InvalidKey => error.InvalidKey,

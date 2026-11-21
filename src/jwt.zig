@@ -182,8 +182,7 @@ pub fn verifyNested(comptime Claims: type, io: std.Io, token: []const u8, decryp
 
 /// `verify`'s checks of a compact JWS: its signature, then its type and claims.
 fn verifySigned(comptime Claims: type, signed: []const u8, keys: []const Key, validation: Validation, now: std.Io.Timestamp, scratch: []u8, diagnostics: *jws.Diagnostics) VerifyError!Verified(Claims) {
-    const leeway_seconds: u32 = validation.leeway.raw();
-    aegis.assert.invariant(leeway_seconds <= 300, "leeway_seconds <= 300");
+    aegis.assert.invariant(validation.leeway.compare(.literal("300s")) != .gt, "the leeway is at most 300s");
     const verified = try jws.verify(signed, keys, .{
         .algorithms = validation.algorithms,
         .max_bytes = validation.max_bytes,
@@ -303,8 +302,7 @@ pub const InspectError = jws.InspectError || error{
 /// never a reason to trust its content. Strings borrow from `scratch` (at
 /// least `jws.scratchLength(token.len)` bytes).
 pub fn inspect(comptime Claims: type, token: []const u8, inspection: Inspection, now: std.Io.Timestamp, scratch: []u8) InspectError!Inspected(Claims) {
-    const leeway_seconds: u32 = inspection.leeway.raw();
-    aegis.assert.invariant(leeway_seconds <= 300, "leeway_seconds <= 300");
+    aegis.assert.invariant(inspection.leeway.compare(.literal("300s")) != .gt, "the leeway is at most 300s");
     const header = try jws.inspect(token, inspection.max_bytes, scratch);
     const read = try readClaims(Claims, header.typ, header.payload, header.rest, inspection, now);
     return .{ .header = header, .registered = read.registered, .claims = read.claims, .rest = read.rest };
@@ -376,8 +374,8 @@ pub fn numericDate(bytes: []const u8) error{InvalidClaims}!i64 {
 }
 
 fn checkRegistered(r: Registered, v: Inspection, now: std.Io.Timestamp) ClaimsError!void {
-    const seconds: i64 = time.unixSeconds(now);
-    const leeway: i64 = v.leeway.raw();
+    const today = time.NumericDate.fromRaw(time.unixSeconds(now));
+    const leeway = v.leeway.convert(.second, i64, .exact);
     const required = v.required;
     if ((required.iss and r.iss == null) or (required.sub and r.sub == null) or (required.aud and !r.aud.present) or
         (required.exp and r.exp == null) or (required.nbf and r.nbf == null) or (required.iat and r.iat == null) or
@@ -394,13 +392,12 @@ fn checkRegistered(r: Registered, v: Inspection, now: std.Io.Timestamp) ClaimsEr
         if (!r.aud.present) return error.MissingClaim;
         if (!r.aud.contains(audience)) return error.WrongAudience;
     } else if (r.aud.present) return error.WrongAudience;
-    if (r.exp) |exp| if (seconds >= exp +| leeway) return error.Expired;
-    if (r.nbf) |nbf| if (seconds +| leeway < nbf) return error.NotYetValid;
+    if (r.exp) |exp| if (today.compare(time.NumericDate.fromRaw(exp).saturatingAdd(leeway)) != .lt) return error.Expired;
+    if (r.nbf) |nbf| if (today.saturatingAdd(leeway).compare(.fromRaw(nbf)) == .lt) return error.NotYetValid;
     if (v.max_age) |max_age| {
-        const iat = r.iat.?;
-        if (iat > seconds +| leeway) return error.TooOld;
-        const max_seconds: i64 = max_age.raw();
-        if (seconds -| iat > max_seconds +| leeway) return error.TooOld;
+        const iat: time.NumericDate = .fromRaw(r.iat.?);
+        if (iat.compare(today.saturatingAdd(leeway)) == .gt) return error.TooOld;
+        if (iat.saturatingDurationTo(today).compare(max_age.convert(.second, i64, .exact).saturatingAdd(leeway)) == .gt) return error.TooOld;
     }
 }
 

@@ -137,8 +137,7 @@ pub fn readEncryptedResponse(comptime Claims: type, io: std.Io, arena: std.mem.A
 /// An answer that is not a 200: the resource's refusal, read from its
 /// challenge or its error body; null for a 200.
 fn refusal(comptime Claims: type, arena: std.mem.Allocator, status: u16, challenges: []const []const u8, body: []const u8, options: ReadOptions) ReadError!?Response(Claims) {
-    const limit: usize = options.max_bytes.raw();
-    if (body.len > limit) return error.TooLarge;
+    if (options.max_bytes.compare(.fromRaw(body.len)) == .lt) return error.TooLarge;
     if (status == 200) return null;
     if (challenge.read(arena, challenges) catch null) |c| if (c.@"error") |code| if (code != .other) {
         return .{ .refused = .{ .code = code, .name = .init(@tagName(code)), .description = .init(c.error_description orelse "") } };

@@ -139,8 +139,7 @@ pub const Verifier = struct {
         // A resource without DPoP reads another scheme as no token.
         if (scheme == .dpop and v.dpop == null) return v.refuse(arena, .unauthorized, .bearer, null, null, null);
         const token = presented.token;
-        const limit: usize = v.max_token_bytes.raw();
-        if (token.len > limit) return v.refuse(arena, .unauthorized, scheme, .invalid_token, "size", null);
+        if (v.max_token_bytes.compare(.fromRaw(token.len)) == .lt) return v.refuse(arena, .unauthorized, scheme, .invalid_token, "size", null);
         const now = std.Io.Clock.real.now(io);
 
         var binding: access_token.Binding = .{};
@@ -245,15 +244,15 @@ pub const Verifier = struct {
             },
             .introspected => |i| i,
         };
-        const seconds: i64 = time.unixSeconds(now);
-        const leeway: i64 = v.leeway.raw();
+        const today = time.NumericDate.fromRaw(time.unixSeconds(now));
+        const leeway = v.leeway.convert(.second, i64, .exact);
         if (!i.active) return v.refuse(arena, .unauthorized, scheme, .invalid_token, "inactive", null);
         access_token.holds(binding, i.jkt, i.x5t_s256, i.bound and i.jkt == null and i.x5t_s256 == null) catch |err| return v.refuse(arena, .unauthorized, scheme, .invalid_token, switch (err) {
             error.BoundToken => "bound",
             error.WrongBinding => "binding",
         }, null);
-        if (i.exp) |exp| if (seconds >= exp +| leeway) return v.refuse(arena, .unauthorized, scheme, .invalid_token, "expired", null);
-        if (i.nbf) |nbf| if (seconds +| leeway < nbf) return v.refuse(arena, .unauthorized, scheme, .invalid_token, "not_yet_valid", null);
+        if (i.exp) |exp| if (today.compare(time.NumericDate.fromRaw(exp).saturatingAdd(leeway)) != .lt) return v.refuse(arena, .unauthorized, scheme, .invalid_token, "expired", null);
+        if (i.nbf) |nbf| if (today.saturatingAdd(leeway).compare(.fromRaw(nbf)) == .lt) return v.refuse(arena, .unauthorized, scheme, .invalid_token, "not_yet_valid", null);
         if (i.iss) |iss| if (!std.mem.eql(u8, iss, v.issuer)) return v.refuse(arena, .unauthorized, scheme, .invalid_token, "issuer", null);
         // A token must name this resource: one for another would be replayed
         // here (RFC 8707, MCP's audience rule).

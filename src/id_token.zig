@@ -144,10 +144,10 @@ fn checked(comptime Extra: type, verified: jwt.Verified(Extra), expected: Expect
 
 fn check(comptime Extra: type, verified: jwt.Verified(Extra), expected: Expected, now: std.Io.Timestamp) VerifyError!Verified(Extra) {
     if (verified.header.typ) |typ| if (!jwt.mediaTypeIs(typ, "JWT")) return error.WrongType;
-    const seconds: i64 = time.unixSeconds(now);
-    const leeway: i64 = expected.leeway.raw();
+    const today = time.NumericDate.fromRaw(time.unixSeconds(now));
+    const leeway = expected.leeway.convert(.second, i64, .exact);
     // `iat` in the future is a token not yet made.
-    if (verified.registered.iat.? > seconds +| leeway) return error.TooOld;
+    if (time.NumericDate.fromRaw(verified.registered.iat.?).compare(today.saturatingAdd(leeway)) == .gt) return error.TooOld;
 
     var fixed: std.heap.FixedBufferAllocator = .init(verified.rest);
     const wire = strand.json.parseLeaky(WireClaims, fixed.allocator(), verified.payload, .{
@@ -174,8 +174,8 @@ fn check(comptime Extra: type, verified: jwt.Verified(Extra), expected: Expected
         if (!same.declassify("a refused nonce ends the check")) return error.WrongNonce;
     }
     if (expected.max_age) |max_age| {
-        const auth_time = id.auth_time orelse return error.AuthenticationTooOld;
-        if (seconds -| auth_time > @as(i64, max_age.raw()) +| leeway) return error.AuthenticationTooOld;
+        const auth_time: time.NumericDate = .fromRaw(id.auth_time orelse return error.AuthenticationTooOld);
+        if (auth_time.saturatingDurationTo(today).compare(max_age.convert(.second, i64, .exact).saturatingAdd(leeway)) == .gt) return error.AuthenticationTooOld;
     }
     if (expected.access_token) |access_token| if (id.at_hash) |at_hash| {
         var buffer: [43]u8 = undefined;

@@ -32,8 +32,7 @@ pub const SplitError = error{ Malformed, TooLarge };
 /// whatever the input (the `strings.Split` denial of service of go-jose,
 /// golang-jwt and x/oauth2 cannot happen here).
 pub fn split(token: []const u8, max: Bytes) SplitError!Parts {
-    const limit: usize = max.raw();
-    if (token.len > limit) return error.TooLarge;
+    if (max.compare(.fromRaw(token.len)) == .lt) return error.TooLarge;
     var dots: [2]usize = undefined;
     var found: usize = 0;
     for (token, 0..) |c, i| {
@@ -490,8 +489,7 @@ fn flatString(arena: std.mem.Allocator, member: ?strand.json.Raw) error{Malforme
 }
 
 fn verifyJsonChecked(document: []const u8, keys: []const Key, options: Options, scratch: []u8, diagnostics: *Diagnostics) VerifyError!Verified {
-    const limit: usize = options.max_bytes.raw();
-    if (document.len > limit) return error.TooLarge;
+    if (options.max_bytes.compare(.fromRaw(document.len)) == .lt) return error.TooLarge;
     if (scratch.len < scratchLengthJson(document.len, if (options.detached_payload) |d| d.len else 0)) return error.ScratchTooSmall;
     var fixed: std.heap.FixedBufferAllocator = .init(scratch);
     const wire = strand.json.parseLeaky(WireDocument, fixed.allocator(), document, .{

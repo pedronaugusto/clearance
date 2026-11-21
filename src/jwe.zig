@@ -265,8 +265,7 @@ pub fn decrypt(io: std.Io, token: []const u8, keys: []const DecryptionKey, optio
 }
 
 fn decryptChecked(io: std.Io, token: []const u8, keys: []const DecryptionKey, options: Options, scratch: []u8, diagnostics: *Diagnostics) DecryptError!Decrypted {
-    const limit: usize = options.max_bytes.raw();
-    if (token.len > limit) return error.TooLarge;
+    if (options.max_bytes.compare(.fromRaw(token.len)) == .lt) return error.TooLarge;
     if (scratch.len < scratchLength(token.len)) return error.ScratchTooSmall;
     var fixed: std.heap.FixedBufferAllocator = .init(scratch);
     const arena = fixed.allocator();

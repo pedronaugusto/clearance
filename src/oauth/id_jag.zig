@@ -178,8 +178,8 @@ pub fn readIssued(gpa: std.mem.Allocator, status: u16, body: []const u8, request
     // of them could spend at another.
     if (registered.aud.values.len != 1) return error.WrongAudience;
     if (blank(registered.sub.?) or blank(registered.jti.?)) return error.MissingClaim;
-    const leeway: i64 = options.leeway.raw();
-    if (registered.iat.? > time.unixSeconds(options.now) +| leeway) return error.TooOld;
+    const latest = time.NumericDate.fromRaw(time.unixSeconds(options.now)).saturatingAdd(options.leeway.convert(.second, i64, .exact));
+    if (time.NumericDate.fromRaw(registered.iat.?).compare(latest) == .gt) return error.TooOld;
     const claims = read.claims;
     var rest: std.heap.FixedBufferAllocator = .init(read.rest);
     if (!std.mem.eql(u8, claims.client_id orelse return error.MissingClaim, request.client_id)) return error.WrongClient;

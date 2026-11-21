@@ -189,8 +189,8 @@ pub fn verifyProof(io: std.Io, proof: []const u8, expected: Expected, now: std.I
 }
 
 fn verifyChecked(io: std.Io, proof: []const u8, expected: Expected, now: std.Io.Timestamp, scratch: []u8, out: *Verified, diagnostics: *jws.Diagnostics) VerifyError!void {
-    const leeway: i64 = expected.leeway.raw();
-    aegis.assert.invariant(leeway <= 300, "leeway <= 300");
+    const leeway = expected.leeway.convert(.second, i64, .exact);
+    aegis.assert.invariant(expected.leeway.compare(.literal("300s")) != .gt, "the leeway is at most 300s");
     aegis.assert.invariant(expected.algorithms.len > 0, "expected.algorithms.len > 0");
     for (expected.algorithms) |a| aegis.assert.invariant(a.family() != .hmac, "a.family() != .hmac");
 
@@ -229,9 +229,10 @@ fn verifyChecked(io: std.Io, proof: []const u8, expected: Expected, now: std.Io.
 
     if (!std.mem.eql(u8, htm, expected.htm)) return error.WrongRequest;
     if (!sameUri(htu, expected.htu)) return error.WrongRequest;
-    const seconds: i64 = time.unixSeconds(now);
-    const max_age: i64 = expected.max_age.raw();
-    if (iat > seconds +| leeway or seconds -| iat > max_age +| leeway) return error.TooOld;
+    const today = time.NumericDate.fromRaw(time.unixSeconds(now));
+    const issued: time.NumericDate = .fromRaw(iat);
+    const max_age = expected.max_age.convert(.second, i64, .exact);
+    if (issued.compare(today.saturatingAdd(leeway)) == .gt or issued.saturatingDurationTo(today).compare(max_age.saturatingAdd(leeway)) == .gt) return error.TooOld;
     if (expected.access_token) |token| {
         const ath = claims.ath orelse return error.WrongAccessToken;
         var hash: [32]u8 = undefined;
@@ -246,7 +247,7 @@ fn verifyChecked(io: std.Io, proof: []const u8, expected: Expected, now: std.Io.
     }
     out.thumbprint = jwk.thumbprint(out.key);
     if (expected.replay) |replay| {
-        const fresh = replay.record(io, jwt.replayId(&out.thumbprint, jti), iat +| max_age +| leeway +| 1, seconds) catch |err| switch (err) {
+        const fresh = replay.record(io, jwt.replayId(&out.thumbprint, jti), issued.saturatingAdd(max_age).saturatingAdd(leeway).saturatingAdd(.literal("1s")).raw(), today.raw()) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             error.Full => return error.ReplayFull,
         };

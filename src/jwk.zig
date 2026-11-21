@@ -133,8 +133,7 @@ pub const KeySet = struct {
 
     /// Reads `{"keys":[...]}`, or a single JWK as a set of one.
     pub fn parse(gpa: std.mem.Allocator, document: []const u8, options: Options) ParseError!KeySet {
-        const limit: usize = options.max_bytes.raw();
-        if (document.len > limit) return error.TooLarge;
+        if (options.max_bytes.compare(.fromRaw(document.len)) == .lt) return error.TooLarge;
         var set: KeySet = .{ .keys = &.{}, .skipped = .initFill(0), .arena = .init(gpa), .secrets = null, .document = try .init(gpa, document.len), .gpa = gpa };
         errdefer set.deinit();
         const arena = set.arena.allocator();
@@ -274,8 +273,7 @@ pub const PrivateKey = struct {
     /// private members decoded into wiped memory, both erased before this
     /// returns; nothing else holds them.
     pub fn parse(gpa: std.mem.Allocator, document: []const u8, options: PrivateOptions) PrivateError!PrivateKey {
-        const limit: usize = options.max_bytes.raw();
-        if (document.len > limit) return error.TooLarge;
+        if (options.max_bytes.compare(.fromRaw(document.len)) == .lt) return error.TooLarge;
         var text = try aegis.SecretBytes.init(gpa, document.len);
         defer text.deinit(gpa);
         // glint-ignore: Z026 -- a fresh allocation of the document's length
