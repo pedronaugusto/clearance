@@ -55,6 +55,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- clearance's own development holds it to the family's policy: `"policy": "family"` in ci/preflight.json, beside the hardened profile ci/workflow.json declares; the hardened and hardened-tsan legs pass.
 - The package a project fetches holds no test data: the JOSE cookbook (RFC 7520), RFC 9964's ML-DSA examples and Wycheproof's JOSE files, with their provenance and licence, move from `src/testing/vectors/` to `testdata/vectors/`, outside `build.zig.zon`'s paths, and the tests read them through the development build's `testdata` module. A fetch is 206 KB compressed and 0.9 MiB unpacked, where it was 414 KB and 1.5 MiB.
 - Pins strand main 7658e11 (from cb3d74c), which took JSON Schema validation out into strand_schema, and uplink main 51e2436 (from e3cd60c): the strand and uplink parley takes, so a program with both holds one of each.
 - Pins aegis f52eabe, still 0.2.4, the one aegis the family builds on, and on it strand 8155bf9, cloak 44151e7 and uplink cd13bdc; development on preflight's ci-standard 158c176 and shakedown c29751d.
