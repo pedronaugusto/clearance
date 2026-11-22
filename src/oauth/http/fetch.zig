@@ -25,6 +25,9 @@ pub const Error = error{
     TlsFailed,
     Canceled,
     OutOfMemory,
+    /// The `Io` has no task to keep the exchange's timeout: refused before it
+    /// ran, never run unbounded. This side's, never the endpoint's.
+    ConcurrencyUnavailable,
 };
 
 /// An answer read whole.
@@ -109,6 +112,7 @@ fn getWith(gpa: std.mem.Allocator, io: std.Io, http: *uplink.Client, target: []c
         error.OutOfMemory => error.OutOfMemory,
         error.TimedOut => error.TimedOut,
         error.Canceled => error.Canceled,
+        error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
         error.TlsFailed, error.ClientCertificateRejected => error.TlsFailed,
         error.ConnectionFailed, error.HttpProtocolError, error.BadContentEncoding, error.BodyIncomplete => error.ConnectionFailed,
     };
@@ -239,6 +243,7 @@ fn readFailure(response: *const uplink.Response) Error {
     return switch (response.failure()) {
         error.TimedOut => error.TimedOut,
         error.Canceled => error.Canceled,
+        error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
         error.TlsFailed, error.ClientCertificateRejected => error.TlsFailed,
         error.ConnectionFailed, error.HttpProtocolError, error.BadContentEncoding, error.BodyIncomplete => error.ConnectionFailed,
     };
@@ -249,6 +254,7 @@ fn send(http: *uplink.Client, io: std.Io, request: uplink.Request) Error!uplink.
         error.OutOfMemory => error.OutOfMemory,
         error.TimedOut => error.TimedOut,
         error.Canceled => error.Canceled,
+        error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
         error.TlsFailed, error.ClientCertificateRejected, error.ClientCertificateSchemeUnsupported, error.CertificateBundleUnreadable => error.TlsFailed,
         error.InvalidUrl, error.UnsupportedScheme => error.InvalidEndpoint,
         else => error.ConnectionFailed,
