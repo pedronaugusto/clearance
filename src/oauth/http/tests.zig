@@ -4,6 +4,7 @@ const std = @import("std");
 const uplink = @import("uplink");
 const clearance = @import("clearance");
 const cloak = @import("cloak");
+const shakedown = @import("shakedown");
 const oauth = @import("../../oauth.zig");
 
 const testing = std.testing;
@@ -1365,4 +1366,29 @@ test "a workload's JWT as the grant, with no client; a refusal is the server's a
     p.mutex.lockUncancelable(io);
     defer p.mutex.unlock(io);
     try testing.expectEqual(before + 1, p.token_requests);
+}
+
+/// An `Io` with no task to spare: no timeout of an exchange can be kept.
+const Serial = shakedown.Layer(u8, .{
+    .concurrent = struct {
+        fn concurrent(_: ?*anyopaque, _: usize, _: std.mem.Alignment, _: []const u8, _: std.mem.Alignment, _: *const fn (*const anyopaque, *anyopaque) void) Io.ConcurrentError!*Io.AnyFuture {
+            return error.ConcurrencyUnavailable;
+        }
+    }.concurrent,
+    .groupConcurrent = struct {
+        fn groupConcurrent(_: ?*anyopaque, _: *Io.Group, _: []const u8, _: std.mem.Alignment, _: *const fn (*const anyopaque) void) Io.ConcurrentError!void {
+            return error.ConcurrencyUnavailable;
+        }
+    }.groupConcurrent,
+});
+
+test "a fetch whose timeout the Io cannot keep is refused by name, never read as a failed connection" {
+    const gpa = testing.allocator;
+    var serial: Serial = .init(testing.io, 0);
+    const io = serial.io();
+    var http: uplink.Client = .init(gpa, .{});
+    defer http.deinit(io);
+    // Refused before any connection is tried: this side's, not the endpoint's.
+    const timeout: Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } };
+    try testing.expectError(error.ConcurrencyUnavailable, oauth.fetch.get(gpa, io, &http, "http://127.0.0.1:9/keys", .fromRaw(4096), .{ .timeout = timeout }));
 }
