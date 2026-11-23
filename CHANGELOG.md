@@ -67,6 +67,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- On an `Io` with no task to spare, an exchange's reads and writes under a timeout are bounded and served on Windows too, where each was refused with `ConcurrencyUnavailable`: uplink pinned at its main bd2755e, on reactor 768bbf4, which bounds a stream socket's operation on the calling thread where `Io.Threaded` refuses a timed one.
+
 - The JSON serializations follow one rule: `recipients` (JWE) or `signatures` (JWS) selects the general syntax, which reads only the members RFC 7516 §7.2.1 or RFC 7515 §7.2.1 define and ignores every other top-level member; without it the document is flattened. `jwe.decrypt` refused a general JWE with a top-level `header` or `encrypted_key` beside `recipients` as `Malformed`, and `jws.verifyJson` a general JWS with a top-level `signature`, `protected` or `header` beside `signatures`; the RFCs define neither member in the general syntax (§7.2.2 forbids `recipients` and `signatures` in the flattened one, so there is no ambiguity), and a member they do not define MUST be ignored. go-jose v4's `FullSerialize` writes recipient 0's `encrypted_key` at the top level too, so its general JWE was refused (trials' JOSE exchange); it decrypts now, each recipient with its own key, and a top-level `encrypted_key` other than recipient 0's, or of another type, changes nothing. `payload` is the one payload either way.
 - `DeviceFlow.wait` lets the full interval pass on the awake clock before each poll, as RFC 8628 section 3.5 asks. A timed wait can end up to a timer tick before its deadline (Windows times it on interrupt time, which runs apart from the awake clock), so a poll could go out a few milliseconds early and draw `slow_down`.
 
